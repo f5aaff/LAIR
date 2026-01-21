@@ -1,14 +1,50 @@
 use crate::app::{App, CurrentScreen};
 use ratatui::Terminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::cursor;
+use ratatui::crossterm::terminal;
+use ratatui::crossterm::execute;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
-use std::io::{self, Error};
+use std::io::{self, Error, Write};
+use std::process::Command;
+
+/// Launch nvim to edit a file, then return to the TUI
+/// This function temporarily restores the terminal to normal mode,
+/// launches nvim, then restores the TUI state
+fn launch_nvim_editor(file_path: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    
+    // Temporarily leave alternate screen and restore terminal
+    terminal::disable_raw_mode()?;
+    execute!(
+        stdout,
+        terminal::LeaveAlternateScreen,
+        cursor::Show
+    )?;
+    stdout.flush()?;
+
+    // Launch nvim
+    let _status = Command::new("nvim")
+        .arg(file_path)
+        .status()?;
+
+    // Re-enter alternate screen and raw mode
+    terminal::enable_raw_mode()?;
+    execute!(
+        stdout,
+        terminal::EnterAlternateScreen,
+        cursor::Hide
+    )?;
+    stdout.flush()?;
+
+    Ok(())
+}
 
 /// Helper function to create a centered rect using up certain percentage of the available rect `r`
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -131,46 +167,56 @@ fn render_browsing_screen(f: &mut Frame, _app: &App) {
     f.render_widget(footer, chunks[2]);
 }
 
-/// Editing screen - shows note editor interface
+/// New Note screen - shows popup dialog for entering note name
 fn render_editing_screen(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
+    // Create a centered popup dialog
+    let popup_area = centered_rect(60, 30, f.area());
+    
+    // Split the popup into sections
+    let popup_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header with filename
-            Constraint::Min(0),    // Editor area
-            Constraint::Length(3), // Footer
+            Constraint::Length(3), // Title
+            Constraint::Length(5), // Input field
+            Constraint::Length(3), // Help text
         ])
-        .split(f.area());
+        .split(popup_area);
 
-    // Header with current file
-    let filename = app.current_file.as_deref().unwrap_or("Untitled");
-    let header_text = format!("Editing: {}", filename);
-    let header = Paragraph::new(header_text)
+    // Title
+    let title = Paragraph::new("New Note")
         .style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-        .alignment(Alignment::Left)
+        .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
-    f.render_widget(header, chunks[0]);
+    f.render_widget(Clear, popup_area); // Clear the area first
+    f.render_widget(title, popup_chunks[0]);
 
-    // Editor area (placeholder - you'll integrate with neovim later)
-    let editor_text =
-        "Editor content will go here...\n\nThis is where you'll integrate with neovim.";
-    let editor = Paragraph::new(editor_text)
-        .style(Style::default().fg(Color::White))
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title("Editor"));
-    f.render_widget(editor, chunks[1]);
+    // Input field - show the current input with a cursor indicator
+    let input_display = if app.note_name_input.is_empty() {
+        "Enter note name...".to_string()
+    } else {
+        format!("{}_", app.note_name_input)
+    };
+    let input_style = if app.note_name_input.is_empty() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let input = Paragraph::new(input_display)
+        .style(input_style)
+        .block(Block::default().borders(Borders::ALL).title("Note Name"));
+    f.render_widget(input, popup_chunks[1]);
 
-    // Footer
-    let help_text = "Esc: Back | Q: Quit";
+    // Help text
+    let help_text = "Enter: Create & Edit | Esc: Cancel";
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
-    f.render_widget(footer, chunks[2]);
+    f.render_widget(footer, popup_chunks[2]);
 }
 
 /// Exiting screen - confirmation dialog
@@ -223,7 +269,7 @@ pub fn run_app<B: ratatui::backend::Backend>(
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') => {
                         app.current_screen = CurrentScreen::Editing;
-                        app.current_file = Some("new_note.md".to_string());
+                        app.note_name_input.clear(); // Clear input when entering
                     }
                     KeyCode::Char('b') | KeyCode::Char('B') => {
                         app.current_screen = CurrentScreen::Browsing;
@@ -244,14 +290,46 @@ pub fn run_app<B: ratatui::backend::Backend>(
                 }
                 CurrentScreen::Editing => {
                     match key.code {
+                        KeyCode::Enter => {
+                            // Create note and launch nvim
+                            if !app.note_name_input.is_empty() {
+                                let note_name = app.note_name_input.trim();
+                                if !note_name.is_empty() {
+                                    // Ensure it has .md extension if not present
+                                    let file_name = if note_name.ends_with(".md") {
+                                        note_name.to_string()
+                                    } else {
+                                        format!("{}.md", note_name)
+                                    };
+                                    
+                                    // Launch nvim with the new note
+                                    if let Err(_e) = launch_nvim_editor(&file_name) {
+                                        // Error launching nvim - continue in TUI
+                                    }
+                                    
+                                    // Return to main screen after nvim exits
+                                    app.current_screen = CurrentScreen::Main;
+                                    app.note_name_input.clear();
+                                    app.current_file = None;
+                                }
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            // Remove last character
+                            app.note_name_input.pop();
+                        }
                         KeyCode::Esc => {
+                            // Cancel and return to main
                             app.current_screen = CurrentScreen::Main;
+                            app.note_name_input.clear();
                             app.current_file = None;
                         }
-                        KeyCode::Char('q') | KeyCode::Char('Q') => {
-                            app.current_screen = CurrentScreen::Exiting;
+                        KeyCode::Char(c) => {
+                            // Add character to input (allow alphanumeric, spaces, dashes, underscores, dots)
+                            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
+                                app.note_name_input.push(c);
+                            }
                         }
-                        // TODO: Add editor interaction logic
                         _ => {}
                     }
                 }
