@@ -1,9 +1,10 @@
 use crate::app::{App, CurrentScreen};
+use crossterm::event::KeyModifiers;
 use ratatui::Terminal;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::crossterm::cursor;
-use ratatui::crossterm::terminal;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -19,28 +20,18 @@ use std::process::Command;
 /// launches nvim, then restores the TUI state
 fn launch_nvim_editor(file_path: &str) -> io::Result<()> {
     let mut stdout = io::stdout();
-    
+
     // Temporarily leave alternate screen and restore terminal
     terminal::disable_raw_mode()?;
-    execute!(
-        stdout,
-        terminal::LeaveAlternateScreen,
-        cursor::Show
-    )?;
+    execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
     stdout.flush()?;
 
     // Launch nvim
-    let _status = Command::new("nvim")
-        .arg(file_path)
-        .status()?;
+    let _status = Command::new("nvim").arg(file_path).status()?;
 
     // Re-enter alternate screen and raw mode
     terminal::enable_raw_mode()?;
-    execute!(
-        stdout,
-        terminal::EnterAlternateScreen,
-        cursor::Hide
-    )?;
+    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
     stdout.flush()?;
 
     Ok(())
@@ -73,6 +64,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         CurrentScreen::Main => render_main_screen(f, app),
         CurrentScreen::Browsing => render_browsing_screen(f, app),
         CurrentScreen::Editing => render_editing_screen(f, app),
+        CurrentScreen::Settings => render_settings_screen(f, app),
         CurrentScreen::Exiting => render_exiting_screen(f, app),
     }
 }
@@ -89,7 +81,7 @@ fn render_main_screen(f: &mut Frame, _app: &App) {
         .split(f.area());
 
     // Header
-    let header = Paragraph::new("Escritoire - Note Management")
+    let header = Paragraph::new("LAIR - Note Management")
         .style(
             Style::default()
                 .fg(Color::Cyan)
@@ -105,6 +97,7 @@ fn render_main_screen(f: &mut Frame, _app: &App) {
         Line::from("(N) New Note"),
         Line::from("(B) Browse Notes"),
         Line::from("(Q) Quit"),
+        Line::from("(S) Settings"),
     ];
     let content = Paragraph::new(options)
         .style(Style::default().fg(Color::White))
@@ -122,7 +115,7 @@ fn render_main_screen(f: &mut Frame, _app: &App) {
 }
 
 /// Browsing screen - shows list of notes
-fn render_browsing_screen(f: &mut Frame, _app: &App) {
+fn render_browsing_screen(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -143,12 +136,12 @@ fn render_browsing_screen(f: &mut Frame, _app: &App) {
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(header, chunks[0]);
 
-    // Note list (placeholder - you'll populate this with actual notes)
-    let notes: Vec<ListItem> = vec![
-        ListItem::new("Note 1.md"),
-        ListItem::new("Note 2.md"),
-        ListItem::new("Note 3.md"),
-    ];
+    // Note list
+    let notes:Vec<ListItem> = app
+        .browse_items
+        .iter()
+        .map(|(text, _)| ListItem::new(text.as_str()))
+        .collect();
     let list = List::new(notes)
         .block(Block::default().borders(Borders::ALL).title("Notes"))
         .highlight_style(
@@ -156,7 +149,7 @@ fn render_browsing_screen(f: &mut Frame, _app: &App) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         );
-    f.render_widget(list, chunks[1]);
+    f.render_stateful_widget(list, chunks[1], &mut app.browse_list_state.clone());
 
     // Footer
     let help_text = "↑↓ Navigate | Enter: Open | Esc: Back | Q: Quit";
@@ -171,7 +164,7 @@ fn render_browsing_screen(f: &mut Frame, _app: &App) {
 fn render_editing_screen(f: &mut Frame, app: &App) {
     // Create a centered popup dialog
     let popup_area = centered_rect(60, 30, f.area());
-    
+
     // Split the popup into sections
     let popup_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -217,6 +210,122 @@ fn render_editing_screen(f: &mut Frame, app: &App) {
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, popup_chunks[2]);
+}
+
+fn render_settings_screen(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header
+            Constraint::Min(0),    // Settings fields
+            Constraint::Length(3), // Footer
+        ])
+        .split(f.area());
+
+    // Header
+    let header = Paragraph::new("Settings")
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(header, chunks[0]);
+
+    // Settings fields area
+    let settings_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5), // Notes Directory
+            Constraint::Length(5), // Editor
+            Constraint::Length(5), // File Format
+        ])
+        .split(chunks[1]);
+
+    // Helper function to render a settings field
+    let render_field = |f: &mut Frame, area: Rect, label: &str, value: &str, is_active: bool| {
+        let field_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(20), // Label
+                Constraint::Min(0),     // Value
+            ])
+            .split(area);
+
+        // Label
+        let label_style = if is_active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let label_text = Paragraph::new(label)
+            .style(label_style)
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(label_text, field_chunks[0]);
+
+        // Value input field
+        let value_display = if value.is_empty() {
+            format!("{}_", "Enter value...")
+        } else {
+            format!("{}_", value)
+        };
+        let value_style = if is_active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let value_text = Paragraph::new(value_display)
+            .style(value_style)
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(value_text, field_chunks[1]);
+    };
+
+    // Notes Directory field
+    let is_active = app.active_settings_field == Some(crate::app::SettingsField::NotesDirectory);
+    render_field(
+        f,
+        settings_area[0],
+        "Notes Directory:",
+        &app.settings_field_inputs[0],
+        is_active,
+    );
+
+    // Editor field
+    let is_active = app.active_settings_field == Some(crate::app::SettingsField::Editor);
+    render_field(
+        f,
+        settings_area[1],
+        "Editor:",
+        &app.settings_field_inputs[1],
+        is_active,
+    );
+
+    // File Format field
+    let is_active = app.active_settings_field == Some(crate::app::SettingsField::FileFormat);
+    render_field(
+        f,
+        settings_area[2],
+        "File Format:",
+        &app.settings_field_inputs[2],
+        is_active,
+    );
+
+    // Footer
+    let help_text = if app.active_settings_field.is_some() {
+        "Type to edit | Enter: Save | Esc: Cancel/Back"
+    } else {
+        "↑↓ Navigate | Enter: Edit | S: Save | Esc: Back"
+    };
+    let footer = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(footer, chunks[2]);
 }
 
 /// Exiting screen - confirmation dialog
@@ -272,7 +381,13 @@ pub fn run_app<B: ratatui::backend::Backend>(
                         app.note_name_input.clear(); // Clear input when entering
                     }
                     KeyCode::Char('b') | KeyCode::Char('B') => {
+                        app.load_browse_items();
                         app.current_screen = CurrentScreen::Browsing;
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        app.current_screen = CurrentScreen::Settings;
+                        app.reset_settings_inputs(); // Reset to current saved values
+                        app.active_settings_field = None;
                     }
                     _ => {}
                 },
@@ -284,7 +399,22 @@ pub fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Char('q') | KeyCode::Char('Q') => {
                             app.current_screen = CurrentScreen::Exiting;
                         }
-                        // TODO: Add navigation and selection logic
+                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                            app.browse_up();
+                        }
+                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                            app.browse_down();
+                        }
+                        KeyCode::Enter => {
+                            // Open the selected file
+                            if let Some(file_path) = app.get_selected_file_path() {
+                                let path_str = file_path.to_string_lossy().to_string();
+                                if let Err(_e) = launch_nvim_editor(&path_str) {
+                                    // Error launching editor - continue in TUI
+                                }
+                                app.current_file = Some(path_str);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -301,12 +431,12 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                     } else {
                                         format!("{}.md", note_name)
                                     };
-                                    
+
                                     // Launch nvim with the new note
                                     if let Err(_e) = launch_nvim_editor(&file_name) {
                                         // Error launching nvim - continue in TUI
                                     }
-                                    
+
                                     // Return to main screen after nvim exits
                                     app.current_screen = CurrentScreen::Main;
                                     app.note_name_input.clear();
@@ -328,6 +458,107 @@ pub fn run_app<B: ratatui::backend::Backend>(
                             // Add character to input (allow alphanumeric, spaces, dashes, underscores, dots)
                             if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
                                 app.note_name_input.push(c);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                CurrentScreen::Settings => {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                            // Navigate up through fields
+                            app.active_settings_field = match app.active_settings_field {
+                                None => Some(crate::app::SettingsField::NotesDirectory),
+                                Some(crate::app::SettingsField::NotesDirectory) => {
+                                    Some(crate::app::SettingsField::NotesDirectory)
+                                }
+                                Some(crate::app::SettingsField::Editor) => {
+                                    Some(crate::app::SettingsField::NotesDirectory)
+                                }
+                                Some(crate::app::SettingsField::FileFormat) => {
+                                    Some(crate::app::SettingsField::Editor)
+                                }
+                            };
+                        }
+                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                            // Navigate down through fields
+                            app.active_settings_field = match app.active_settings_field {
+                                None => Some(crate::app::SettingsField::NotesDirectory),
+                                Some(crate::app::SettingsField::NotesDirectory) => {
+                                    Some(crate::app::SettingsField::Editor)
+                                }
+                                Some(crate::app::SettingsField::Editor) => {
+                                    Some(crate::app::SettingsField::FileFormat)
+                                }
+                                Some(crate::app::SettingsField::FileFormat) => {
+                                    Some(crate::app::SettingsField::FileFormat)
+                                }
+                            };
+                        }
+                        KeyCode::Enter => {
+                            // Start editing if no field is active, or save if editing
+                            if app.active_settings_field.is_none() {
+                                app.active_settings_field =
+                                    Some(crate::app::SettingsField::NotesDirectory);
+                            } else {
+                                // Save settings and exit edit mode
+                                if let Err(e) = app.save_settings() {
+                                    eprintln!("Error saving settings: {}", e);
+                                }
+                                app.active_settings_field = None;
+                            }
+                        }
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Save settings
+                            if let Err(e) = app.save_settings() {
+                                eprintln!("Error saving settings: {}", e);
+                            }
+                            app.active_settings_field = None;
+                        }
+                        KeyCode::Esc => {
+                            if app.active_settings_field.is_some() {
+                                // Cancel editing - reset to saved values
+                                app.reset_settings_inputs();
+                                app.active_settings_field = None;
+                            } else {
+                                // Exit settings screen
+                                app.current_screen = CurrentScreen::Main;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            // Handle backspace when editing
+                            if let Some(field) = app.active_settings_field {
+                                let idx = match field {
+                                    crate::app::SettingsField::NotesDirectory => 0,
+                                    crate::app::SettingsField::Editor => 1,
+                                    crate::app::SettingsField::FileFormat => 2,
+                                };
+                                app.settings_field_inputs[idx].pop();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            // Add character when editing
+                            if let Some(field) = app.active_settings_field {
+                                let idx = match field {
+                                    crate::app::SettingsField::NotesDirectory => 0,
+                                    crate::app::SettingsField::Editor => 1,
+                                    crate::app::SettingsField::FileFormat => 2,
+                                };
+                                // Allow most characters for paths and editor names
+                                // For file format, only allow alphanumeric
+                                match field {
+                                    crate::app::SettingsField::FileFormat => {
+                                        if c.is_alphanumeric() {
+                                            app.settings_field_inputs[idx].push(c);
+                                        }
+                                    }
+                                    _ => {
+                                        // Allow most characters for paths and editor
+                                        if !c.is_control() {
+                                            app.settings_field_inputs[idx].push(c);
+                                        }
+                                    }
+                                }
                             }
                         }
                         _ => {}

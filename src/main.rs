@@ -1,12 +1,16 @@
 mod app;
+mod browse;
+mod settings;
 mod ui;
 use crate::app::App;
 use crate::ui::run_app;
 use ratatui::Terminal;
+use ratatui::crossterm::event::DisableMouseCapture;
 use ratatui::crossterm::event::EnableMouseCapture;
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{EnterAlternateScreen, enable_raw_mode, disable_raw_mode, LeaveAlternateScreen};
-use ratatui::crossterm::event::DisableMouseCapture;
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::prelude::CrosstermBackend;
 use std::error::Error;
 use std::io;

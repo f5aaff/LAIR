@@ -1,4 +1,4 @@
-# Escritoire
+# Lair
 
 this project serves as an abstraction and management layer above neovim, intended for taking and organising notes.
 the intention being, I take a lot of notes, and I don't often consider where to save them - or sensible names.
