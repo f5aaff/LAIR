@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "Escritoire"
+name = "Lair"
 version = "0.1.0"
 dependencies = [
  "color-eyre",
