@@ -1,9 +1,38 @@
 use crate::settings::Settings;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::fs::create_dir_all;
 
-// Return both list items and their corresponding paths
+/// Check if a path should be shown based on expanded folders
+/// A path is shown if all its parent directories (except base) are expanded
+fn should_show_path(path: &Path, base_dir: &Path, expanded_folders: &HashSet<PathBuf>) -> bool {
+    if path == base_dir {
+        return false;
+    }
+    
+    // Check all parent directories up to base_dir
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if parent == base_dir {
+            // Reached base directory, all parents are expanded
+            return true;
+        }
+        
+        // If this parent is not expanded, don't show the path
+        if !expanded_folders.contains(&parent.to_path_buf()) {
+            return false;
+        }
+        
+        current = parent;
+    }
+    
+    true
+}
+
+// Return both list items and their corresponding paths, filtered by expanded folders
 pub fn get_files_as_list_items_with_paths(
     settings: &Settings,
+    expanded_folders: &HashSet<PathBuf>,
 ) -> Result<(Vec<(String, bool)>, Vec<Option<PathBuf>>), Box<dyn std::error::Error>> {
     let base_dir = Path::new(&settings.notes_directory);
     let pattern = base_dir.join("**/*").to_string_lossy().to_string();
@@ -16,6 +45,11 @@ pub fn get_files_as_list_items_with_paths(
         let path = entry?;
 
         if path == base_dir {
+            continue;
+        }
+
+        // Only show paths whose parent folders are expanded
+        if !should_show_path(&path, base_dir, expanded_folders) {
             continue;
         }
 
@@ -42,8 +76,10 @@ pub fn get_files_as_list_items_with_paths(
                 .to_string();
 
             let is_file = path.is_file();
+            let is_expanded = path.is_dir() && expanded_folders.contains(&path);
+            let expand_indicator = if is_expanded { "▼ " } else { "▶ " };
             let display_text = if path.is_dir() {
-                format!("  📁 {}", display_name)
+                format!("  {}📁 {}", expand_indicator, display_name)
             } else {
                 format!("  📄 {}", display_name)
             };
@@ -54,4 +90,12 @@ pub fn get_files_as_list_items_with_paths(
     }
 
     Ok((items, paths))
+}
+
+pub fn make_new_folder(parent_folder: &Path, new_folder: &Path) ->Result<(), Box<dyn std::error::Error>> {
+    let new_folder_str = format!("{}/{}",parent_folder.display(),new_folder.display());
+    let new_folder_path = Path::new(&new_folder_str);
+
+    create_dir_all(new_folder_path)?;
+    Ok(())
 }

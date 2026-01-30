@@ -13,21 +13,23 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 use std::io::{self, Error, Write};
+use std::path::PathBuf;
+use std::fs;
 use std::process::Command;
 
-/// Launch nvim to edit a file, then return to the TUI
+/// Launch editor to edit a file, then return to the TUI
 /// This function temporarily restores the terminal to normal mode,
-/// launches nvim, then restores the TUI state
-fn launch_nvim_editor(file_path: &str) -> io::Result<()> {
+/// launches the editor, then restores the TUI state
+fn launch_editor(file_path: &std::path::Path, editor: &str) -> io::Result<()> {
     let mut stdout = io::stdout();
 
     // Temporarily leave alternate screen and restore terminal
     terminal::disable_raw_mode()?;
     execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
     stdout.flush()?;
-
-    // Launch nvim
-    let _status = Command::new("nvim").arg(file_path).status()?;
+    
+    // Launch editor
+    let _status = Command::new(editor).arg(file_path).status()?;
 
     // Re-enter alternate screen and raw mode
     terminal::enable_raw_mode()?;
@@ -35,6 +37,60 @@ fn launch_nvim_editor(file_path: &str) -> io::Result<()> {
     stdout.flush()?;
 
     Ok(())
+}
+
+/// Create a new note file with date-based organization
+/// Returns the full path to the created note file
+/// If target_dir is provided, creates the note in that directory instead of date-based folder
+fn create_note_file(
+    notes_dir: &str,
+    note_name: Option<&str>,
+    file_format: &str,
+    target_dir: Option<&PathBuf>,
+) -> io::Result<PathBuf> {
+    let now = chrono::Utc::now();
+    
+    // Determine the target directory
+    let date_dir = if let Some(target) = target_dir {
+        // Use provided target directory
+        target.clone()
+    } else {
+        // Use date-based folder structure (YY-MM-DD)
+        let base_dir = PathBuf::from(notes_dir);
+        let date_folder = now.format("%y-%m-%d").to_string();
+        base_dir.join(&date_folder)
+    };
+    
+    // Ensure the date directory exists
+    fs::create_dir_all(&date_dir)?;
+    
+    // Determine the file name
+    let file_name = if let Some(name) = note_name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            // Empty name, use timestamp
+            format!("notes-{}.{}", now.format("%y-%m-%d_%H-%M-%S"), file_format)
+        } else {
+            // Use provided name, ensure it has the correct extension
+            if trimmed.ends_with(&format!(".{}", file_format)) {
+                trimmed.to_string()
+            } else {
+                format!("{}.{}", trimmed, file_format)
+            }
+        }
+    } else {
+        // No name provided, use timestamp
+        format!("notes-{}.{}", now.format("%y-%m-%d_%H-%M-%S"), file_format)
+    };
+    
+    let file_path = date_dir.join(&file_name);
+    
+    // Create empty file if it doesn't exist
+    if !file_path.exists() {
+        fs::File::create(&file_path)?;
+    }
+    
+    Ok(file_path)
 }
 
 /// Helper function to create a centered rect using up certain percentage of the available rect `r`
@@ -59,18 +115,19 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 /// Main UI function that dispatches to screen-specific renderers
-pub fn ui(f: &mut Frame, app: &App) {
+pub fn ui(f: &mut Frame, app: &mut App) {
     match app.current_screen {
         CurrentScreen::Main => render_main_screen(f, app),
         CurrentScreen::Browsing => render_browsing_screen(f, app),
         CurrentScreen::Editing => render_editing_screen(f, app),
+        CurrentScreen::CreatingFolder => render_creating_folder_screen(f, app),
         CurrentScreen::Settings => render_settings_screen(f, app),
         CurrentScreen::Exiting => render_exiting_screen(f, app),
     }
 }
 
 /// Main screen - shows welcome message and options
-fn render_main_screen(f: &mut Frame, _app: &App) {
+fn render_main_screen(f: &mut Frame, _app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -115,7 +172,7 @@ fn render_main_screen(f: &mut Frame, _app: &App) {
 }
 
 /// Browsing screen - shows list of notes
-fn render_browsing_screen(f: &mut Frame, app: &App) {
+fn render_browsing_screen(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -137,7 +194,7 @@ fn render_browsing_screen(f: &mut Frame, app: &App) {
     f.render_widget(header, chunks[0]);
 
     // Note list
-    let notes:Vec<ListItem> = app
+    let notes: Vec<ListItem> = app
         .browse_items
         .iter()
         .map(|(text, _)| ListItem::new(text.as_str()))
@@ -149,10 +206,10 @@ fn render_browsing_screen(f: &mut Frame, app: &App) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         );
-    f.render_stateful_widget(list, chunks[1], &mut app.browse_list_state.clone());
+    f.render_stateful_widget(list, chunks[1], &mut app.browse_list_state);
 
     // Footer
-    let help_text = "↑↓ Navigate | Enter: Open | Esc: Back | Q: Quit";
+    let help_text = "↑↓ Navigate | Space/→: Expand/Collapse | Enter: Open | N: New Note | F: New Folder | Esc: Back | Q: Quit";
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center)
@@ -161,7 +218,7 @@ fn render_browsing_screen(f: &mut Frame, app: &App) {
 }
 
 /// New Note screen - shows popup dialog for entering note name
-fn render_editing_screen(f: &mut Frame, app: &App) {
+fn render_editing_screen(f: &mut Frame, app: &mut App) {
     // Create a centered popup dialog
     let popup_area = centered_rect(60, 30, f.area());
 
@@ -212,7 +269,59 @@ fn render_editing_screen(f: &mut Frame, app: &App) {
     f.render_widget(footer, popup_chunks[2]);
 }
 
-fn render_settings_screen(f: &mut Frame, app: &App) {
+/// New Folder screen - shows popup dialog for entering folder name
+fn render_creating_folder_screen(f: &mut Frame, app: &mut App) {
+    // Create a centered popup dialog
+    let popup_area = centered_rect(60, 30, f.area());
+
+    // Split the popup into sections
+    let popup_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Title
+            Constraint::Length(5), // Input field
+            Constraint::Length(3), // Help text
+        ])
+        .split(popup_area);
+
+    // Title
+    let title = Paragraph::new("New Folder")
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(Clear, popup_area); // Clear the area first
+    f.render_widget(title, popup_chunks[0]);
+
+    // Input field - show the current input with a cursor indicator
+    let input_display = if app.folder_name_input.is_empty() {
+        "Enter folder name (empty for timestamp)...".to_string()
+    } else {
+        format!("{}_", app.folder_name_input)
+    };
+    let input_style = if app.folder_name_input.is_empty() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let input = Paragraph::new(input_display)
+        .style(input_style)
+        .block(Block::default().borders(Borders::ALL).title("Folder Name"));
+    f.render_widget(input, popup_chunks[1]);
+
+    // Help text
+    let help_text = "Enter: Create Folder | Esc: Cancel";
+    let footer = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(footer, popup_chunks[2]);
+}
+
+fn render_settings_screen(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -329,7 +438,7 @@ fn render_settings_screen(f: &mut Frame, app: &App) {
 }
 
 /// Exiting screen - confirmation dialog
-fn render_exiting_screen(f: &mut Frame, _app: &App) {
+fn render_exiting_screen(f: &mut Frame, _app: &mut App) {
     // Render the previous screen in the background (optional)
     // For now, just show the exit confirmation
 
@@ -364,7 +473,7 @@ pub fn run_app<B: ratatui::backend::Backend>(
 ) -> io::Result<bool> {
     loop {
         terminal
-            .draw(|f| ui(f, &*app))
+            .draw(|f| ui(f, app))
             .map_err(|e| Error::other(format!("{}", e)))?;
 
         let Event::Key(key) = event::read()? else {
@@ -408,12 +517,27 @@ pub fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Enter => {
                             // Open the selected file
                             if let Some(file_path) = app.get_selected_file_path() {
-                                let path_str = file_path.to_string_lossy().to_string();
-                                if let Err(_e) = launch_nvim_editor(&path_str) {
+                                if let Err(_e) = launch_editor(file_path, &app.settings.editor) {
                                     // Error launching editor - continue in TUI
                                 }
-                                app.current_file = Some(path_str);
+                                app.current_file = Some(file_path.to_string_lossy().to_string());
                             }
+                        }
+                        KeyCode::Char(' ') | KeyCode::Right => {
+                            // Toggle expand/collapse of selected folder
+                            app.toggle_folder_expansion();
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') => {
+                            // Create new note in selected directory
+                            app.target_directory = Some(app.get_selected_directory());
+                            app.note_name_input.clear();
+                            app.current_screen = CurrentScreen::Editing;
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('F') => {
+                            // Create new folder - go to folder creation screen
+                            app.target_directory = Some(app.get_selected_directory());
+                            app.folder_name_input.clear();
+                            app.current_screen = CurrentScreen::CreatingFolder;
                         }
                         _ => {}
                     }
@@ -421,26 +545,41 @@ pub fn run_app<B: ratatui::backend::Backend>(
                 CurrentScreen::Editing => {
                     match key.code {
                         KeyCode::Enter => {
-                            // Create note and launch nvim
-                            if !app.note_name_input.is_empty() {
-                                let note_name = app.note_name_input.trim();
-                                if !note_name.is_empty() {
-                                    // Ensure it has .md extension if not present
-                                    let file_name = if note_name.ends_with(".md") {
-                                        note_name.to_string()
-                                    } else {
-                                        format!("{}.md", note_name)
-                                    };
-
-                                    // Launch nvim with the new note
-                                    if let Err(_e) = launch_nvim_editor(&file_name) {
-                                        // Error launching nvim - continue in TUI
+                            // Create note and launch editor
+                            let note_name = if app.note_name_input.trim().is_empty() {
+                                None
+                            } else {
+                                Some(app.note_name_input.as_str())
+                            };
+                            
+                            match create_note_file(
+                                &app.settings.notes_directory,
+                                note_name,
+                                &app.settings.default_file_format,
+                                app.target_directory.as_ref(),
+                            ) {
+                                Ok(file_path) => {
+                                    // Launch editor with the new note
+                                    if let Err(_e) = launch_editor(&file_path, &app.settings.editor) {
+                                        // Error launching editor - continue in TUI
                                     }
 
-                                    // Return to main screen after nvim exits
-                                    app.current_screen = CurrentScreen::Main;
+                                    // Return to appropriate screen after editor exits
+                                    if app.target_directory.is_some() {
+                                        // Came from browse screen, return there
+                                        app.current_screen = CurrentScreen::Browsing;
+                                        app.load_browse_items(); // Reload to show new note
+                                    } else {
+                                        // Came from main screen
+                                        app.current_screen = CurrentScreen::Main;
+                                    }
                                     app.note_name_input.clear();
-                                    app.current_file = None;
+                                    app.target_directory = None;
+                                    app.current_file = Some(file_path.to_string_lossy().to_string());
+                                }
+                                Err(e) => {
+                                    eprintln!("Error creating note file: {}", e);
+                                    // Stay in editing screen on error
                                 }
                             }
                         }
@@ -449,15 +588,50 @@ pub fn run_app<B: ratatui::backend::Backend>(
                             app.note_name_input.pop();
                         }
                         KeyCode::Esc => {
-                            // Cancel and return to main
-                            app.current_screen = CurrentScreen::Main;
+                            // Cancel and return to previous screen
+                            if app.target_directory.is_some() {
+                                app.current_screen = CurrentScreen::Browsing;
+                            } else {
+                                app.current_screen = CurrentScreen::Main;
+                            }
                             app.note_name_input.clear();
+                            app.target_directory = None;
                             app.current_file = None;
                         }
                         KeyCode::Char(c) => {
                             // Add character to input (allow alphanumeric, spaces, dashes, underscores, dots)
                             if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
                                 app.note_name_input.push(c);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                CurrentScreen::CreatingFolder => {
+                    match key.code {
+                        KeyCode::Enter => {
+                            // Create folder
+                            if let Err(e) = app.create_new_folder() {
+                                eprintln!("Error creating folder: {}", e);
+                            } else {
+                                // Return to browse screen
+                                app.current_screen = CurrentScreen::Browsing;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            // Remove last character
+                            app.folder_name_input.pop();
+                        }
+                        KeyCode::Esc => {
+                            // Cancel and return to browse screen
+                            app.current_screen = CurrentScreen::Browsing;
+                            app.folder_name_input.clear();
+                            app.target_directory = None;
+                        }
+                        KeyCode::Char(c) => {
+                            // Add character to input (allow alphanumeric, spaces, dashes, underscores, dots)
+                            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
+                                app.folder_name_input.push(c);
                             }
                         }
                         _ => {}
