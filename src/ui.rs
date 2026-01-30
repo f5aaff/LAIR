@@ -35,6 +35,10 @@ fn launch_editor(file_path: &std::path::Path, editor: &str) -> io::Result<()> {
     terminal::enable_raw_mode()?;
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
     stdout.flush()?;
+    
+    // Clear any residual output from the editor
+    execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
+    stdout.flush()?;
 
     Ok(())
 }
@@ -521,6 +525,8 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                     // Error launching editor - continue in TUI
                                 }
                                 app.current_file = Some(file_path.to_string_lossy().to_string());
+                                // Reload browse items to reflect any changes made in the editor
+                                app.load_browse_items();
                             }
                         }
                         KeyCode::Char(' ') | KeyCode::Right => {
@@ -559,22 +565,27 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                 app.target_directory.as_ref(),
                             ) {
                                 Ok(file_path) => {
+                                    let target_dir = app.target_directory.take();
+                                    
                                     // Launch editor with the new note
                                     if let Err(_e) = launch_editor(&file_path, &app.settings.editor) {
                                         // Error launching editor - continue in TUI
                                     }
 
                                     // Return to appropriate screen after editor exits
-                                    if app.target_directory.is_some() {
+                                    if target_dir.is_some() {
                                         // Came from browse screen, return there
                                         app.current_screen = CurrentScreen::Browsing;
+                                        // Expand the target directory and reload to show new note
+                                        if let Some(dir) = target_dir {
+                                            app.expanded_folders.insert(dir);
+                                        }
                                         app.load_browse_items(); // Reload to show new note
                                     } else {
                                         // Came from main screen
                                         app.current_screen = CurrentScreen::Main;
                                     }
                                     app.note_name_input.clear();
-                                    app.target_directory = None;
                                     app.current_file = Some(file_path.to_string_lossy().to_string());
                                 }
                                 Err(e) => {
@@ -610,7 +621,7 @@ pub fn run_app<B: ratatui::backend::Backend>(
                 CurrentScreen::CreatingFolder => {
                     match key.code {
                         KeyCode::Enter => {
-                            // Create folder
+                            // Create folder (load_browse_items is called inside create_new_folder)
                             if let Err(e) = app.create_new_folder() {
                                 eprintln!("Error creating folder: {}", e);
                             } else {

@@ -74,13 +74,52 @@ impl App {
     }
 
     pub fn load_browse_items(&mut self) {
+        // Preserve the currently selected path or folder header before reloading
+        let selected_idx = self.browse_list_state.selected();
+        let selected_path = selected_idx
+            .and_then(|idx| self.browse_paths.get(idx))
+            .and_then(|path_opt| path_opt.as_ref())
+            .cloned();
+        
+        // Also preserve the display text if it was a folder header (path is None)
+        let selected_display = selected_idx
+            .and_then(|idx| self.browse_items.get(idx))
+            .map(|(text, _)| text.clone());
+
         match crate::browse::get_files_as_list_items_with_paths(&self.settings, &self.expanded_folders) {
             Ok((items, paths)) => {
                 self.browse_items = items;
                 self.browse_paths = paths;
 
-                // Reset selection to first item if available
-                if !self.browse_items.is_empty() {
+                // Try to restore selection
+                if let Some(path_to_find) = selected_path {
+                    // Find the index of the path we had selected before
+                    if let Some(new_idx) = self.browse_paths.iter().position(|p| {
+                        p.as_ref().map(|p2| p2 == &path_to_find).unwrap_or(false)
+                    }) {
+                        self.browse_list_state.select(Some(new_idx));
+                    } else if !self.browse_items.is_empty() {
+                        // Path not found, try to maintain approximate position
+                        let old_idx = selected_idx.unwrap_or(0);
+                        let new_idx = old_idx.min(self.browse_items.len().saturating_sub(1));
+                        self.browse_list_state.select(Some(new_idx));
+                    } else {
+                        self.browse_list_state.select(None);
+                    }
+                } else if let Some(display_to_find) = selected_display {
+                    // Was a folder header, try to find the same header
+                    if let Some(new_idx) = self.browse_items.iter().position(|(text, _)| text == &display_to_find) {
+                        self.browse_list_state.select(Some(new_idx));
+                    } else if !self.browse_items.is_empty() {
+                        // Header not found, try to maintain approximate position
+                        let old_idx = selected_idx.unwrap_or(0);
+                        let new_idx = old_idx.min(self.browse_items.len().saturating_sub(1));
+                        self.browse_list_state.select(Some(new_idx));
+                    } else {
+                        self.browse_list_state.select(None);
+                    }
+                } else if !self.browse_items.is_empty() {
+                    // No previous selection, select first item
                     self.browse_list_state.select(Some(0));
                 } else {
                     self.browse_list_state.select(None);
@@ -128,10 +167,12 @@ impl App {
     }
 
     /// Get the selected directory path (if a directory is selected) or parent of selected file
+    /// Returns the directory where new items should be created
     pub fn get_selected_directory(&self) -> PathBuf {
         if let Some(selected) = self.browse_list_state.selected() {
             if let Some(Some(path)) = self.browse_paths.get(selected) {
                 if path.is_dir() {
+                    // If a directory is selected, use that directory
                     return path.clone();
                 } else if path.is_file() {
                     // If a file is selected, use its parent directory
@@ -160,10 +201,18 @@ impl App {
         
         // Clear input and reset target directory
         self.folder_name_input.clear();
-        self.target_directory = None;
+        let target_dir = self.target_directory.take();
         
         // Reload browse items to show the new folder
         self.load_browse_items();
+        
+        // If we were creating in a specific directory, expand it so the new folder is visible
+        if let Some(dir) = target_dir {
+            self.expanded_folders.insert(dir);
+            // Reload again to show the expanded folder's contents
+            self.load_browse_items();
+        }
+        
         Ok(())
     }
 
@@ -177,7 +226,7 @@ impl App {
                     } else {
                         self.expanded_folders.insert(path.clone());
                     }
-                    // Reload items to reflect expansion state
+                    // Reload items to reflect expansion state (preserves selection)
                     self.load_browse_items();
                 }
             }

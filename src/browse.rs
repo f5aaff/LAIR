@@ -29,6 +29,53 @@ fn should_show_path(path: &Path, base_dir: &Path, expanded_folders: &HashSet<Pat
     true
 }
 
+
+/// Recursively add items for a directory and its children
+fn add_directory_items(
+    dir_path: &Path,
+    base_dir: &Path,
+    expanded_folders: &HashSet<PathBuf>,
+    paths_by_parent: &std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
+    items: &mut Vec<(String, bool)>,
+    paths: &mut Vec<Option<PathBuf>>,
+    depth: usize,
+) {
+    // Get children of this directory
+    if let Some(children) = paths_by_parent.get(dir_path) {
+        let mut sorted_children = children.clone();
+        sorted_children.sort();
+        
+        for child_path in sorted_children {
+            let display_name = child_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let is_file = child_path.is_file();
+            let is_expanded = child_path.is_dir() && expanded_folders.contains(&child_path);
+            let expand_indicator = if is_expanded { "▼ " } else { "▶ " };
+            
+            // Indent based on depth
+            let item_indent = "  ".repeat(depth);
+            
+            let display_text = if child_path.is_dir() {
+                format!("{} {}📁 {}", item_indent, expand_indicator, display_name)
+            } else {
+                format!("{} 📄 {}", item_indent, display_name)
+            };
+
+            items.push((display_text, is_file));
+            paths.push(Some(child_path.clone()));
+
+            // If this is an expanded directory, recursively add its children
+            if is_expanded {
+                add_directory_items(&child_path, base_dir, expanded_folders, paths_by_parent, items, paths, depth + 1);
+            }
+        }
+    }
+}
+
 // Return both list items and their corresponding paths, filtered by expanded folders
 pub fn get_files_as_list_items_with_paths(
     settings: &Settings,
@@ -39,55 +86,39 @@ pub fn get_files_as_list_items_with_paths(
 
     let mut items: Vec<(String, bool)> = Vec::new(); // (display_text, is_file)
     let mut paths: Vec<Option<PathBuf>> = Vec::new();
-    let mut current_folder: Option<PathBuf> = None;
 
+    // Collect all paths first
+    let mut all_paths: Vec<PathBuf> = Vec::new();
     for entry in glob::glob(&pattern)? {
         let path = entry?;
-
-        if path == base_dir {
-            continue;
+        if path != base_dir {
+            all_paths.push(path);
         }
+    }
 
+    // Sort paths to ensure consistent ordering
+    all_paths.sort();
+
+    // Group paths by their parent directory
+    let mut paths_by_parent: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> = std::collections::BTreeMap::new();
+    for path in all_paths {
         // Only show paths whose parent folders are expanded
         if !should_show_path(&path, base_dir, expanded_folders) {
             continue;
         }
 
         if let Some(parent) = path.parent() {
-            // Add folder header when folder changes
-            if current_folder.as_deref() != Some(parent) {
-                if let Ok(folder_name) = parent.strip_prefix(base_dir) {
-                    let folder_display = if folder_name.as_os_str().is_empty() {
-                        "Root".to_string()
-                    } else {
-                        folder_name.to_string_lossy().to_string()
-                    };
-                    items.push((format!("📂 {}", folder_display), false));
-                    paths.push(None); // Folder headers have no path
-                }
-                current_folder = Some(parent.to_path_buf());
-            }
-
-            // Add file/folder item
-            let display_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            let is_file = path.is_file();
-            let is_expanded = path.is_dir() && expanded_folders.contains(&path);
-            let expand_indicator = if is_expanded { "▼ " } else { "▶ " };
-            let display_text = if path.is_dir() {
-                format!("  {}📁 {}", expand_indicator, display_name)
-            } else {
-                format!("  📄 {}", display_name)
-            };
-
-            items.push((display_text, is_file));
-            paths.push(Some(path));
+            let parent_path = parent.to_path_buf();
+            paths_by_parent.entry(parent_path).or_insert_with(Vec::new).push(path);
         }
     }
+
+    // Add root folder header
+    items.push((format!("📂 Root"), false));
+    paths.push(None); // Folder headers have no path
+
+    // Recursively add items starting from root (depth 0 for root's children)
+    add_directory_items(base_dir, base_dir, expanded_folders, &paths_by_parent, &mut items, &mut paths, 1);
 
     Ok((items, paths))
 }
