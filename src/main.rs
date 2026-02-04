@@ -1,5 +1,6 @@
 mod app;
 mod browse;
+mod search;
 mod settings;
 mod ui;
 use crate::app::App;

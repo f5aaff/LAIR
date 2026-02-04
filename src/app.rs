@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::browse;
-
+use crate::search;
 pub enum CurrentScreen {
     Main,
     Browsing,
@@ -23,7 +23,7 @@ pub enum SettingsField {
 pub struct App {
     pub current_file: Option<String>,
     pub current_screen: CurrentScreen,
-    pub note_name_input: String, // For entering new note name
+    pub note_name_input: String,   // For entering new note name
     pub folder_name_input: String, // For entering new folder name
     pub settings: crate::settings::Settings,
     pub settings_field_inputs: [String; 3], // Input buffers for each settings field
@@ -31,8 +31,12 @@ pub struct App {
     pub browse_list_state: ListState,       // State for browse list selection
     pub browse_items: Vec<(String, bool)>,  // (display_text, is_file) pairs for browse items
     pub browse_paths: Vec<Option<std::path::PathBuf>>, // Corresponding paths (None for folder headers)
-    pub expanded_folders: HashSet<PathBuf>, // Set of expanded folder paths
+    pub expanded_folders: HashSet<PathBuf>,            // Set of expanded folder paths
     pub target_directory: Option<PathBuf>, // Directory where new note/folder should be created (from browse)
+    pub search_input: String,              // Search query input
+    pub is_searching: bool,                // Whether search mode is active
+    pub filtered_browse_items: Vec<(String, bool)>, // Filtered items based on search
+    pub filtered_browse_paths: Vec<Option<PathBuf>>, // Filtered paths based on search
 }
 impl App {
     pub fn new() -> App {
@@ -54,6 +58,10 @@ impl App {
             browse_paths: Vec::new(),
             expanded_folders: HashSet::new(),
             target_directory: None,
+            search_input: String::new(),
+            is_searching: false,
+            filtered_browse_items: Vec::new(),
+            filtered_browse_paths: Vec::new(),
         }
     }
 
@@ -80,23 +88,37 @@ impl App {
             .and_then(|idx| self.browse_paths.get(idx))
             .and_then(|path_opt| path_opt.as_ref())
             .cloned();
-        
+
         // Also preserve the display text if it was a folder header (path is None)
         let selected_display = selected_idx
             .and_then(|idx| self.browse_items.get(idx))
             .map(|(text, _)| text.clone());
 
-        match crate::browse::get_files_as_list_items_with_paths(&self.settings, &self.expanded_folders) {
+        match crate::browse::get_files_as_list_items_with_paths(
+            &self.settings,
+            &self.expanded_folders,
+        ) {
             Ok((items, paths)) => {
                 self.browse_items = items;
                 self.browse_paths = paths;
 
+                // If searching, reapply search filter
+                if self.is_searching {
+                    self.apply_search_filter();
+                } else {
+                    // Not searching, clear filtered items
+                    self.filtered_browse_items.clear();
+                    self.filtered_browse_paths.clear();
+                }
+
                 // Try to restore selection
                 if let Some(path_to_find) = selected_path {
                     // Find the index of the path we had selected before
-                    if let Some(new_idx) = self.browse_paths.iter().position(|p| {
-                        p.as_ref().map(|p2| p2 == &path_to_find).unwrap_or(false)
-                    }) {
+                    if let Some(new_idx) = self
+                        .browse_paths
+                        .iter()
+                        .position(|p| p.as_ref().map(|p2| p2 == &path_to_find).unwrap_or(false))
+                    {
                         self.browse_list_state.select(Some(new_idx));
                     } else if !self.browse_items.is_empty() {
                         // Path not found, try to maintain approximate position
@@ -108,7 +130,11 @@ impl App {
                     }
                 } else if let Some(display_to_find) = selected_display {
                     // Was a folder header, try to find the same header
-                    if let Some(new_idx) = self.browse_items.iter().position(|(text, _)| text == &display_to_find) {
+                    if let Some(new_idx) = self
+                        .browse_items
+                        .iter()
+                        .position(|(text, _)| text == &display_to_find)
+                    {
                         self.browse_list_state.select(Some(new_idx));
                     } else if !self.browse_items.is_empty() {
                         // Header not found, try to maintain approximate position
@@ -134,60 +160,94 @@ impl App {
     }
     /// Navigate up in browse list
     pub fn browse_up(&mut self) {
+        let items_to_use = if self.is_searching {
+            &self.filtered_browse_items
+        } else {
+            &self.browse_items
+        };
+
         if let Some(selected) = self.browse_list_state.selected() {
             if selected > 0 {
                 self.browse_list_state.select(Some(selected - 1));
             }
-        } else if !self.browse_items.is_empty() {
+        } else if !items_to_use.is_empty() {
             self.browse_list_state.select(Some(0));
         }
     }
 
     /// Navigate down in browse list
     pub fn browse_down(&mut self) {
+        let items_to_use = if self.is_searching {
+            &self.filtered_browse_items
+        } else {
+            &self.browse_items
+        };
+
         if let Some(selected) = self.browse_list_state.selected() {
-            if selected < self.browse_items.len().saturating_sub(1) {
+            if selected < items_to_use.len().saturating_sub(1) {
                 self.browse_list_state.select(Some(selected + 1));
             }
-        } else if !self.browse_items.is_empty() {
+        } else if !items_to_use.is_empty() {
             self.browse_list_state.select(Some(0));
         }
     }
 
     /// Get the selected file path (if a file is selected)
     pub fn get_selected_file_path(&self) -> Option<&std::path::PathBuf> {
-        if let Some(selected) = self.browse_list_state.selected() {
-            if let Some(Some(path)) = self.browse_paths.get(selected) {
-                if path.is_file() {
-                    return Some(path);
-                }
-            }
+        let selected = self.browse_list_state.selected()?;
+        let path = self.browse_paths.get(selected)?.as_ref()?;
+        if path.is_file() {
+            Some(path)
+        } else {
+            None
         }
-        None
     }
 
     /// Get the selected directory path (if a directory is selected) or parent of selected file
     /// Returns the directory where new items should be created
+    /// Uses filtered paths when searching, otherwise uses all paths
     pub fn get_selected_directory(&self) -> PathBuf {
-        if let Some(selected) = self.browse_list_state.selected() {
-            if let Some(Some(path)) = self.browse_paths.get(selected) {
-                if path.is_dir() {
-                    // If a directory is selected, use that directory
-                    return path.clone();
-                } else if path.is_file() {
-                    // If a file is selected, use its parent directory
-                    return path.parent().unwrap_or_else(|| Path::new(&self.settings.notes_directory)).to_path_buf();
-                }
+        let paths_to_use = if self.is_searching {
+            &self.filtered_browse_paths
+        } else {
+            &self.browse_paths
+        };
+
+        let selected = match self.browse_list_state.selected() {
+            Some(s) => s,
+            None => {
+                return PathBuf::from(&self.settings.notes_directory);
             }
+        };
+
+        let path = match paths_to_use.get(selected) {
+            Some(Some(p)) => p,
+            _ => {
+                return PathBuf::from(&self.settings.notes_directory);
+            }
+        };
+
+        if path.is_dir() {
+            // If a directory is selected, use that directory
+            path.clone()
+        } else if path.is_file() {
+            // If a file is selected, use its parent directory
+            path.parent()
+                .unwrap_or_else(|| Path::new(&self.settings.notes_directory))
+                .to_path_buf()
+        } else {
+            // Nothing selected or invalid selection, use base notes directory
+            PathBuf::from(&self.settings.notes_directory)
         }
-        // Nothing selected or invalid selection, use base notes directory
-        PathBuf::from(&self.settings.notes_directory)
     }
 
     /// Create a new folder in the target directory (or selected directory if target not set)
     pub fn create_new_folder(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let parent_folder = self.target_directory.clone().unwrap_or_else(|| self.get_selected_directory());
-        
+        let parent_folder = self
+            .target_directory
+            .clone()
+            .unwrap_or_else(|| self.get_selected_directory());
+
         // Use folder_name_input if provided, otherwise use timestamp
         let new_folder_name = if self.folder_name_input.trim().is_empty() {
             let datetime = chrono::Utc::now().format("%Y-%m-%d_%H-%M");
@@ -195,41 +255,152 @@ impl App {
         } else {
             self.folder_name_input.trim().to_string()
         };
-        
+
         let new_folder_path = Path::new(&new_folder_name);
         browse::make_new_folder(&parent_folder, new_folder_path)?;
-        
+
         // Clear input and reset target directory
         self.folder_name_input.clear();
         let target_dir = self.target_directory.take();
-        
+
         // Reload browse items to show the new folder
         self.load_browse_items();
-        
+
         // If we were creating in a specific directory, expand it so the new folder is visible
         if let Some(dir) = target_dir {
             self.expanded_folders.insert(dir);
             // Reload again to show the expanded folder's contents
             self.load_browse_items();
         }
-        
+
         Ok(())
     }
 
     /// Toggle expand/collapse state of the selected folder
     pub fn toggle_folder_expansion(&mut self) {
-        if let Some(selected) = self.browse_list_state.selected() {
-            if let Some(Some(path)) = self.browse_paths.get(selected) {
-                if path.is_dir() {
-                    if self.expanded_folders.contains(path) {
-                        self.expanded_folders.remove(path);
-                    } else {
-                        self.expanded_folders.insert(path.clone());
-                    }
-                    // Reload items to reflect expansion state (preserves selection)
-                    self.load_browse_items();
+        let selected = match self.browse_list_state.selected() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let path = match self.browse_paths.get(selected) {
+            Some(Some(p)) if p.is_dir() => p,
+            _ => return,
+        };
+
+        if self.expanded_folders.contains(path) {
+            self.expanded_folders.remove(path);
+        } else {
+            self.expanded_folders.insert(path.clone());
+        }
+        // Reload items to reflect expansion state (preserves selection)
+        self.load_browse_items();
+    }
+
+    /// Apply search filter to browse items
+    /// Searches through ALL files in the notes directory, regardless of folder expansion
+    pub fn apply_search_filter(&mut self) {
+        if self.search_input.trim().is_empty() {
+            // No search query, show all items
+            self.filtered_browse_items = self.browse_items.clone();
+            self.filtered_browse_paths = self.browse_paths.clone();
+        } else {
+            // Get ALL files from filesystem (not just visible ones)
+            let all_files = match browse::get_all_files(&self.settings) {
+                Ok(files) => files,
+                Err(_) => {
+                    // Error loading files, clear filtered results
+                    self.filtered_browse_items.clear();
+                    self.filtered_browse_paths.clear();
+                    return;
+                }
+            };
+
+            let query_lower = self.search_input.to_lowercase();
+            let max_edits = 3; // Allow up to 3 character differences
+
+            // Extract filenames from all files
+            let all_file_entries: Vec<(String, bool)> = all_files
+                .iter()
+                .filter_map(|path| {
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| (s.to_string(), true))
+                })
+                .collect();
+
+            // Perform search (case-insensitive)
+            // First try substring matching (more reliable), then fuzzy for typos
+            let all_file_entries_lower: Vec<(String, bool)> = all_file_entries
+                .iter()
+                .map(|(name, is_file)| (name.to_lowercase(), *is_file))
+                .collect();
+            
+            let mut matching_filenames: HashSet<String> = HashSet::new();
+            
+            // First, try substring matching (exact substring match)
+            for (name, _) in &all_file_entries_lower {
+                if name.contains(&query_lower) {
+                    matching_filenames.insert(name.clone());
                 }
             }
+            
+            // If no substring matches, try fuzzy search
+            if matching_filenames.is_empty() {
+                let search_results_lower = search::fuzzy_search(&query_lower, all_file_entries_lower.clone(), max_edits);
+                matching_filenames = search_results_lower.into_iter().collect();
+            }
+
+            // Build filtered results with proper display formatting
+            let mut filtered_items = Vec::new();
+            let mut filtered_paths = Vec::new();
+
+            for file_path in all_files {
+                let filename = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                
+                let filename_lower = filename.to_lowercase();
+                
+                if matching_filenames.contains(&filename_lower) {
+                    // This file matches, add it with proper display formatting
+                    // Calculate relative path for display
+                    let base_dir = Path::new(&self.settings.notes_directory);
+                    let display_text = if let Ok(relative) = file_path.strip_prefix(base_dir) {
+                        if let Some(parent) = relative.parent() {
+                            let parent_str = if parent.as_os_str().is_empty() {
+                                "Root".to_string()
+                            } else {
+                                // Show path components separated by /
+                                parent.components()
+                                    .filter_map(|c| c.as_os_str().to_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" / ")
+                            };
+                            format!("📂 {} / 📄 {}", parent_str, filename)
+                        } else {
+                            format!("📄 {}", filename)
+                        }
+                    } else {
+                        format!("📄 {}", filename)
+                    };
+
+                    filtered_items.push((display_text, true));
+                    filtered_paths.push(Some(file_path));
+                }
+            }
+
+            self.filtered_browse_items = filtered_items;
+            self.filtered_browse_paths = filtered_paths;
+        }
+
+        // Reset selection to first item if available
+        if !self.filtered_browse_items.is_empty() {
+            self.browse_list_state.select(Some(0));
+        } else {
+            self.browse_list_state.select(None);
         }
     }
 }

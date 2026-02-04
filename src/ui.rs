@@ -197,9 +197,14 @@ fn render_browsing_screen(f: &mut Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(header, chunks[0]);
 
-    // Note list
-    let notes: Vec<ListItem> = app
-        .browse_items
+    // Note list - use filtered items if searching, otherwise use all items
+    let items_to_show = if app.is_searching {
+        &app.filtered_browse_items
+    } else {
+        &app.browse_items
+    };
+
+    let notes: Vec<ListItem> = items_to_show
         .iter()
         .map(|(text, _)| ListItem::new(text.as_str()))
         .collect();
@@ -213,12 +218,57 @@ fn render_browsing_screen(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(list, chunks[1], &mut app.browse_list_state);
 
     // Footer
-    let help_text = "↑↓ Navigate | Space/→: Expand/Collapse | Enter: Open | N: New Note | F: New Folder | Esc: Back | Q: Quit";
+    let help_text = if app.is_searching {
+        "Type to search | Esc: Cancel Search | Enter: Open | Q: Quit"
+    } else {
+        "↑↓ Navigate | /: Search | Space/→: Expand/Collapse | Enter: Open | N: New Note | F: New Folder | Esc: Back | Q: Quit"
+    };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, chunks[2]);
+
+    // Render floating search window if searching
+    if app.is_searching {
+        let search_area = centered_rect(75, 15, f.area());
+        let search_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Title
+                Constraint::Length(5), // Input (larger to see more text)
+            ])
+            .split(search_area);
+
+        // Search title
+        let search_title = Paragraph::new("Search")
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(Clear, search_area);
+        f.render_widget(search_title, search_chunks[0]);
+
+        // Search input - show full query with cursor
+        let input_display = if app.search_input.is_empty() {
+            "Enter search query...".to_string()
+        } else {
+            format!("{}_", app.search_input)
+        };
+        let input_style = if app.search_input.is_empty() {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let search_input = Paragraph::new(input_display)
+            .style(input_style)
+            .block(Block::default().borders(Borders::ALL).title("Query"))
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        f.render_widget(search_input, search_chunks[1]);
+    }
 }
 
 /// New Note screen - shows popup dialog for entering note name
@@ -505,47 +555,83 @@ pub fn run_app<B: ratatui::backend::Backend>(
                     _ => {}
                 },
                 CurrentScreen::Browsing => {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.current_screen = CurrentScreen::Main;
-                        }
-                        KeyCode::Char('q') | KeyCode::Char('Q') => {
-                            app.current_screen = CurrentScreen::Exiting;
-                        }
-                        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-                            app.browse_up();
-                        }
-                        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-                            app.browse_down();
-                        }
-                        KeyCode::Enter => {
-                            // Open the selected file
-                            if let Some(file_path) = app.get_selected_file_path() {
-                                if let Err(_e) = launch_editor(file_path, &app.settings.editor) {
-                                    // Error launching editor - continue in TUI
-                                }
-                                app.current_file = Some(file_path.to_string_lossy().to_string());
-                                // Reload browse items to reflect any changes made in the editor
+                    if app.is_searching {
+                        // Handle search input
+                        match key.code {
+                            KeyCode::Esc => {
+                                // Cancel search
+                                app.is_searching = false;
+                                app.search_input.clear();
+                                app.filtered_browse_items.clear();
+                                app.filtered_browse_paths.clear();
+                                // Reload to show all items
                                 app.load_browse_items();
                             }
+                            KeyCode::Enter => {
+                                // Exit search mode but keep results
+                                app.is_searching = false;
+                            }
+                            KeyCode::Backspace => {
+                                app.search_input.pop();
+                                app.apply_search_filter();
+                            }
+                            KeyCode::Char(c) => {
+                                // Add character to search input
+                                app.search_input.push(c);
+                                app.apply_search_filter();
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char(' ') | KeyCode::Right => {
-                            // Toggle expand/collapse of selected folder
-                            app.toggle_folder_expansion();
+                    } else {
+                        // Normal browse mode
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.current_screen = CurrentScreen::Main;
+                            }
+                            KeyCode::Char('q') | KeyCode::Char('Q') => {
+                                app.current_screen = CurrentScreen::Exiting;
+                            }
+                            KeyCode::Char('/') => {
+                                // Start search mode
+                                app.is_searching = true;
+                                app.search_input.clear();
+                                app.apply_search_filter();
+                            }
+                            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                                app.browse_up();
+                            }
+                            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                                app.browse_down();
+                            }
+                            KeyCode::Enter => {
+                                // Open the selected file
+                                if let Some(file_path) = app.get_selected_file_path() {
+                                    if let Err(_e) = launch_editor(file_path, &app.settings.editor) {
+                                        // Error launching editor - continue in TUI
+                                    }
+                                    app.current_file = Some(file_path.to_string_lossy().to_string());
+                                    // Reload browse items to reflect any changes made in the editor
+                                    app.load_browse_items();
+                                }
+                            }
+                            KeyCode::Char(' ') | KeyCode::Right => {
+                                // Toggle expand/collapse of selected folder
+                                app.toggle_folder_expansion();
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                // Create new note in selected directory
+                                app.target_directory = Some(app.get_selected_directory());
+                                app.note_name_input.clear();
+                                app.current_screen = CurrentScreen::Editing;
+                            }
+                            KeyCode::Char('f') | KeyCode::Char('F') => {
+                                // Create new folder - go to folder creation screen
+                                app.target_directory = Some(app.get_selected_directory());
+                                app.folder_name_input.clear();
+                                app.current_screen = CurrentScreen::CreatingFolder;
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char('n') | KeyCode::Char('N') => {
-                            // Create new note in selected directory
-                            app.target_directory = Some(app.get_selected_directory());
-                            app.note_name_input.clear();
-                            app.current_screen = CurrentScreen::Editing;
-                        }
-                        KeyCode::Char('f') | KeyCode::Char('F') => {
-                            // Create new folder - go to folder creation screen
-                            app.target_directory = Some(app.get_selected_directory());
-                            app.folder_name_input.clear();
-                            app.current_screen = CurrentScreen::CreatingFolder;
-                        }
-                        _ => {}
                     }
                 }
                 CurrentScreen::Editing => {
