@@ -20,6 +20,12 @@ pub enum SettingsField {
     FileFormat,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SearchMode {
+    LiveGrep,
+    FuzzySearch,
+}
+
 pub struct App {
     pub current_file: Option<String>,
     pub current_screen: CurrentScreen,
@@ -104,7 +110,7 @@ impl App {
 
                 // If searching, reapply search filter
                 if self.is_searching {
-                    self.apply_search_filter();
+                    self.apply_search_filter(SearchMode::FuzzySearch);
                 } else {
                     // Not searching, clear filtered items
                     self.filtered_browse_items.clear();
@@ -196,11 +202,7 @@ impl App {
     pub fn get_selected_file_path(&self) -> Option<&std::path::PathBuf> {
         let selected = self.browse_list_state.selected()?;
         let path = self.browse_paths.get(selected)?.as_ref()?;
-        if path.is_file() {
-            Some(path)
-        } else {
-            None
-        }
+        if path.is_file() { Some(path) } else { None }
     }
 
     /// Get the selected directory path (if a directory is selected) or parent of selected file
@@ -299,104 +301,159 @@ impl App {
 
     /// Apply search filter to browse items
     /// Searches through ALL files in the notes directory, regardless of folder expansion
-    pub fn apply_search_filter(&mut self) {
+    /// Apply search filter to browse items
+    /// Searches through ALL files in the notes directory, regardless of folder expansion
+    pub fn apply_search_filter(&mut self, search_mode: SearchMode) {
         if self.search_input.trim().is_empty() {
             // No search query, show all items
             self.filtered_browse_items = self.browse_items.clone();
             self.filtered_browse_paths = self.browse_paths.clone();
-        } else {
-            // Get ALL files from filesystem (not just visible ones)
-            let all_files = match browse::get_all_files(&self.settings) {
-                Ok(files) => files,
-                Err(_) => {
-                    // Error loading files, clear filtered results
-                    self.filtered_browse_items.clear();
-                    self.filtered_browse_paths.clear();
-                    return;
-                }
-            };
-
-            let query_lower = self.search_input.to_lowercase();
-            let max_edits = 3; // Allow up to 3 character differences
-
-            // Extract filenames from all files
-            let all_file_entries: Vec<(String, bool)> = all_files
-                .iter()
-                .filter_map(|path| {
-                    path.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|s| (s.to_string(), true))
-                })
-                .collect();
-
-            // Perform search (case-insensitive)
-            // First try substring matching (more reliable), then fuzzy for typos
-            let all_file_entries_lower: Vec<(String, bool)> = all_file_entries
-                .iter()
-                .map(|(name, is_file)| (name.to_lowercase(), *is_file))
-                .collect();
-            
-            let mut matching_filenames: HashSet<String> = HashSet::new();
-            
-            // First, try substring matching (exact substring match)
-            for (name, _) in &all_file_entries_lower {
-                if name.contains(&query_lower) {
-                    matching_filenames.insert(name.clone());
-                }
-            }
-            
-            // If no substring matches, try fuzzy search
-            if matching_filenames.is_empty() {
-                let search_results_lower = search::fuzzy_search(&query_lower, all_file_entries_lower.clone(), max_edits);
-                matching_filenames = search_results_lower.into_iter().collect();
-            }
-
-            // Build filtered results with proper display formatting
-            let mut filtered_items = Vec::new();
-            let mut filtered_paths = Vec::new();
-
-            for file_path in all_files {
-                let filename = file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                
-                let filename_lower = filename.to_lowercase();
-                
-                if matching_filenames.contains(&filename_lower) {
-                    // This file matches, add it with proper display formatting
-                    // Calculate relative path for display
-                    let base_dir = Path::new(&self.settings.notes_directory);
-                    let display_text = if let Ok(relative) = file_path.strip_prefix(base_dir) {
-                        if let Some(parent) = relative.parent() {
-                            let parent_str = if parent.as_os_str().is_empty() {
-                                "Root".to_string()
-                            } else {
-                                // Show path components separated by /
-                                parent.components()
-                                    .filter_map(|c| c.as_os_str().to_str())
-                                    .collect::<Vec<_>>()
-                                    .join(" / ")
-                            };
-                            format!("📂 {} / 📄 {}", parent_str, filename)
-                        } else {
-                            format!("📄 {}", filename)
-                        }
-                    } else {
-                        format!("📄 {}", filename)
-                    };
-
-                    filtered_items.push((display_text, true));
-                    filtered_paths.push(Some(file_path));
-                }
-            }
-
-            self.filtered_browse_items = filtered_items;
-            self.filtered_browse_paths = filtered_paths;
+            return;
         }
 
-        // Reset selection to first item if available
+        match search_mode {
+            SearchMode::LiveGrep => {
+                // Content search using live_grep
+                match search::live_grep(&self.search_input, &self.settings) {
+                    Ok(matching_files) => {
+                        let mut filtered_items = Vec::new();
+                        let mut filtered_paths = Vec::new();
+
+                        let base_dir = Path::new(&self.settings.notes_directory);
+
+                        for file_path in matching_files {
+                            let filename = file_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_default();
+
+                            let display_text =
+                                if let Ok(relative) = file_path.strip_prefix(base_dir) {
+                                    if let Some(parent) = relative.parent() {
+                                        let parent_str = if parent.as_os_str().is_empty() {
+                                            "Root".to_string()
+                                        } else {
+                                            parent
+                                                .components()
+                                                .filter_map(|c| c.as_os_str().to_str())
+                                                .collect::<Vec<_>>()
+                                                .join(" / ")
+                                        };
+                                        format!("📂 {} / 📄 {}", parent_str, filename)
+                                    } else {
+                                        format!("📄 {}", filename)
+                                    }
+                                } else {
+                                    format!("📄 {}", filename)
+                                };
+
+                            filtered_items.push((display_text, true));
+                            filtered_paths.push(Some(file_path));
+                        }
+
+                        self.filtered_browse_items = filtered_items;
+                        self.filtered_browse_paths = filtered_paths;
+                    }
+                    Err(_) => {
+                        self.filtered_browse_items.clear();
+                        self.filtered_browse_paths.clear();
+                    }
+                }
+            }
+            SearchMode::FuzzySearch => {
+                // Filename search using fuzzy/substring matching
+                let all_files = match browse::get_all_files(&self.settings) {
+                    Ok(files) => files,
+                    Err(_) => {
+                        self.filtered_browse_items.clear();
+                        self.filtered_browse_paths.clear();
+                        return;
+                    }
+                };
+
+                let query_lower = self.search_input.to_lowercase();
+                let max_edits = 3;
+
+                // Extract filenames from all files
+                let all_file_entries: Vec<(String, bool)> = all_files
+                    .iter()
+                    .filter_map(|path| {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| (s.to_string(), true))
+                    })
+                    .collect();
+
+                let all_file_entries_lower: Vec<(String, bool)> = all_file_entries
+                    .iter()
+                    .map(|(name, is_file)| (name.to_lowercase(), *is_file))
+                    .collect();
+
+                let mut matching_filenames: HashSet<String> = HashSet::new();
+
+                // First, try substring matching
+                for (name, _) in &all_file_entries_lower {
+                    if name.contains(&query_lower) {
+                        matching_filenames.insert(name.clone());
+                    }
+                }
+
+                // If no substring matches, try fuzzy search
+                if matching_filenames.is_empty() {
+                    let search_results_lower = search::fuzzy_search(
+                        &query_lower,
+                        all_file_entries_lower.clone(),
+                        max_edits,
+                    );
+                    matching_filenames = search_results_lower.into_iter().collect();
+                }
+
+                // Build filtered results
+                let mut filtered_items = Vec::new();
+                let mut filtered_paths = Vec::new();
+
+                for file_path in all_files {
+                    let filename = file_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+
+                    let filename_lower = filename.to_lowercase();
+
+                    if matching_filenames.contains(&filename_lower) {
+                        let base_dir = Path::new(&self.settings.notes_directory);
+                        let display_text = if let Ok(relative) = file_path.strip_prefix(base_dir) {
+                            if let Some(parent) = relative.parent() {
+                                let parent_str = if parent.as_os_str().is_empty() {
+                                    "Root".to_string()
+                                } else {
+                                    parent
+                                        .components()
+                                        .filter_map(|c| c.as_os_str().to_str())
+                                        .collect::<Vec<_>>()
+                                        .join(" / ")
+                                };
+                                format!("📂 {} / 📄 {}", parent_str, filename)
+                            } else {
+                                format!("📄 {}", filename)
+                            }
+                        } else {
+                            format!("📄 {}", filename)
+                        };
+
+                        filtered_items.push((display_text, true));
+                        filtered_paths.push(Some(file_path));
+                    }
+                }
+
+                self.filtered_browse_items = filtered_items;
+                self.filtered_browse_paths = filtered_paths;
+            }
+        }
+
+        // Reset selection
         if !self.filtered_browse_items.is_empty() {
             self.browse_list_state.select(Some(0));
         } else {

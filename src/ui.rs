@@ -1,4 +1,4 @@
-use crate::app::{App, CurrentScreen};
+use crate::app::{App, CurrentScreen, SearchMode};
 use crossterm::event::KeyModifiers;
 use ratatui::Terminal;
 use ratatui::crossterm::cursor;
@@ -27,7 +27,7 @@ fn launch_editor(file_path: &std::path::Path, editor: &str) -> io::Result<()> {
     terminal::disable_raw_mode()?;
     execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
     stdout.flush()?;
-    
+
     // Launch editor
     let _status = Command::new(editor).arg(file_path).status()?;
 
@@ -35,7 +35,7 @@ fn launch_editor(file_path: &std::path::Path, editor: &str) -> io::Result<()> {
     terminal::enable_raw_mode()?;
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
     stdout.flush()?;
-    
+
     // Clear any residual output from the editor
     execute!(stdout, terminal::Clear(terminal::ClearType::All))?;
     stdout.flush()?;
@@ -53,7 +53,7 @@ fn create_note_file(
     target_dir: Option<&PathBuf>,
 ) -> io::Result<PathBuf> {
     let now = chrono::Utc::now();
-    
+
     // Determine the target directory
     let date_dir = if let Some(target) = target_dir {
         // Use provided target directory
@@ -64,10 +64,10 @@ fn create_note_file(
         let date_folder = now.format("%y-%m-%d").to_string();
         base_dir.join(&date_folder)
     };
-    
+
     // Ensure the date directory exists
     fs::create_dir_all(&date_dir)?;
-    
+
     // Determine the file name
     let file_name = if let Some(name) = note_name {
         let trimmed = name.trim();
@@ -86,14 +86,14 @@ fn create_note_file(
         // No name provided, use timestamp
         format!("notes-{}.{}", now.format("%y-%m-%d_%H-%M-%S"), file_format)
     };
-    
+
     let file_path = date_dir.join(&file_name);
-    
+
     // Create empty file if it doesn't exist
     if !file_path.exists() {
         fs::File::create(&file_path)?;
     }
-    
+
     Ok(file_path)
 }
 
@@ -573,12 +573,12 @@ pub fn run_app<B: ratatui::backend::Backend>(
                             }
                             KeyCode::Backspace => {
                                 app.search_input.pop();
-                                app.apply_search_filter();
+                                app.apply_search_filter(SearchMode::FuzzySearch);
                             }
                             KeyCode::Char(c) => {
                                 // Add character to search input
                                 app.search_input.push(c);
-                                app.apply_search_filter();
+                                app.apply_search_filter(SearchMode::FuzzySearch);
                             }
                             _ => {}
                         }
@@ -595,7 +595,13 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                 // Start search mode
                                 app.is_searching = true;
                                 app.search_input.clear();
-                                app.apply_search_filter();
+                                app.apply_search_filter(SearchMode::FuzzySearch);
+                            }
+                            KeyCode::Char('?') => {
+                                // Start search mode
+                                app.is_searching = true;
+                                app.search_input.clear();
+                                app.apply_search_filter(SearchMode::LiveGrep);
                             }
                             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
                                 app.browse_up();
@@ -643,7 +649,7 @@ pub fn run_app<B: ratatui::backend::Backend>(
                             } else {
                                 Some(app.note_name_input.as_str())
                             };
-                            
+
                             match create_note_file(
                                 &app.settings.notes_directory,
                                 note_name,
@@ -652,7 +658,7 @@ pub fn run_app<B: ratatui::backend::Backend>(
                             ) {
                                 Ok(file_path) => {
                                     let target_dir = app.target_directory.take();
-                                    
+
                                     // Launch editor with the new note
                                     if let Err(_e) = launch_editor(&file_path, &app.settings.editor) {
                                         // Error launching editor - continue in TUI
