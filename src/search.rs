@@ -2,12 +2,19 @@ use fuzzy_search::automata::LevenshteinAutomata;
 use grep::regex::RegexMatcher;
 use grep::searcher::sinks::UTF8;
 use grep::searcher::SearcherBuilder;
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::io;
 use std::path::PathBuf;
 
 use crate::browse::get_all_files;
 use crate::settings::Settings;
+
+#[derive(Debug, Clone)]
+pub struct MatchInfo {
+    pub file_path: PathBuf,
+    pub line_number: u64,
+    pub line_content: String,
+}
 
 pub fn fuzzy_search(
     query: &str,
@@ -30,7 +37,7 @@ pub fn fuzzy_search(
 pub fn live_grep(
     query: &str,
     settings: &Settings,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+) -> Result<Vec<MatchInfo>, Box<dyn std::error::Error>> {
     let files = get_all_files(settings)?;
     // Create a case-insensitive regex matcher
     let pattern = format!(r"(?i){}", regex::escape(query));
@@ -39,21 +46,26 @@ pub fn live_grep(
         .binary_detection(grep::searcher::BinaryDetection::quit(b'\x00'))
         .build();
 
-    let mut matching_files = Vec::new();
+    let mut matches = Vec::new();
     for file_path in files {
-        let matched = Cell::new(false);
-        let sink = UTF8(|_line_num: u64, _line: &str| -> io::Result<bool> {
-            matched.set(true);
-            Ok(false)
+        let file_matches = RefCell::new(Vec::new());
+        let sink = UTF8(|line_num: u64, line: &str| -> io::Result<bool> {
+            file_matches.borrow_mut().push((line_num, line.to_string()));
+            Ok(false) // Continue searching
         });
 
         // Search the file
         if let Ok(reader) = std::fs::File::open(&file_path) {
             let _ = searcher.search_file(&matcher, &reader, sink);
-            if matched.get() {
-                matching_files.push(file_path);
+            // Add all matches from this file
+            for (line_num, line_content) in file_matches.into_inner() {
+                matches.push(MatchInfo {
+                    file_path: file_path.clone(),
+                    line_number: line_num,
+                    line_content,
+                });
             }
         }
     }
-    Ok(matching_files)
+    Ok(matches)
 }

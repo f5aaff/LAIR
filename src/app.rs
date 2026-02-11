@@ -41,8 +41,10 @@ pub struct App {
     pub target_directory: Option<PathBuf>, // Directory where new note/folder should be created (from browse)
     pub search_input: String,              // Search query input
     pub is_searching: bool,                // Whether search mode is active
+    pub search_mode: SearchMode,           // Current search mode (FuzzySearch or LiveGrep)
     pub filtered_browse_items: Vec<(String, bool)>, // Filtered items based on search
     pub filtered_browse_paths: Vec<Option<PathBuf>>, // Filtered paths based on search
+    pub grep_matches: Vec<crate::search::MatchInfo>, // Match information for live grep
 }
 impl App {
     pub fn new() -> App {
@@ -66,8 +68,10 @@ impl App {
             target_directory: None,
             search_input: String::new(),
             is_searching: false,
+            search_mode: SearchMode::FuzzySearch,
             filtered_browse_items: Vec::new(),
             filtered_browse_paths: Vec::new(),
+            grep_matches: Vec::new(),
         }
     }
 
@@ -201,7 +205,12 @@ impl App {
     /// Get the selected file path (if a file is selected)
     pub fn get_selected_file_path(&self) -> Option<&std::path::PathBuf> {
         let selected = self.browse_list_state.selected()?;
-        let path = self.browse_paths.get(selected)?.as_ref()?;
+        let paths_to_use = if self.is_searching {
+            &self.filtered_browse_paths
+        } else {
+            &self.browse_paths
+        };
+        let path = paths_to_use.get(selected)?.as_ref()?;
         if path.is_file() { Some(path) } else { None }
     }
 
@@ -301,13 +310,14 @@ impl App {
 
     /// Apply search filter to browse items
     /// Searches through ALL files in the notes directory, regardless of folder expansion
-    /// Apply search filter to browse items
-    /// Searches through ALL files in the notes directory, regardless of folder expansion
     pub fn apply_search_filter(&mut self, search_mode: SearchMode) {
+        self.search_mode = search_mode;
+        
         if self.search_input.trim().is_empty() {
             // No search query, show all items
             self.filtered_browse_items = self.browse_items.clone();
             self.filtered_browse_paths = self.browse_paths.clone();
+            self.grep_matches.clear();
             return;
         }
 
@@ -315,13 +325,23 @@ impl App {
             SearchMode::LiveGrep => {
                 // Content search using live_grep
                 match search::live_grep(&self.search_input, &self.settings) {
-                    Ok(matching_files) => {
+                    Ok(matches) => {
+                        // Store all matches
+                        self.grep_matches = matches.clone();
+                        
+                        // Group matches by file and count matches per file
+                        use std::collections::HashMap;
+                        let mut file_match_counts: HashMap<PathBuf, usize> = HashMap::new();
+                        for m in &matches {
+                            *file_match_counts.entry(m.file_path.clone()).or_insert(0) += 1;
+                        }
+                        
                         let mut filtered_items = Vec::new();
                         let mut filtered_paths = Vec::new();
-
                         let base_dir = Path::new(&self.settings.notes_directory);
 
-                        for file_path in matching_files {
+                        // Build display items for each unique file
+                        for (file_path, match_count) in file_match_counts {
                             let filename = file_path
                                 .file_name()
                                 .and_then(|n| n.to_str())
@@ -340,12 +360,12 @@ impl App {
                                                 .collect::<Vec<_>>()
                                                 .join(" / ")
                                         };
-                                        format!("📂 {} / 📄 {}", parent_str, filename)
+                                        format!("📂 {} / 📄 {} ({} matches)", parent_str, filename, match_count)
                                     } else {
-                                        format!("📄 {}", filename)
+                                        format!("📄 {} ({} matches)", filename, match_count)
                                     }
                                 } else {
-                                    format!("📄 {}", filename)
+                                    format!("📄 {} ({} matches)", filename, match_count)
                                 };
 
                             filtered_items.push((display_text, true));
@@ -358,6 +378,7 @@ impl App {
                     Err(_) => {
                         self.filtered_browse_items.clear();
                         self.filtered_browse_paths.clear();
+                        self.grep_matches.clear();
                     }
                 }
             }

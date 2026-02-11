@@ -118,6 +118,125 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// Create a search title widget
+fn create_search_title(title: &str) -> Paragraph<'static> {
+    Paragraph::new(title.to_string())
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL))
+}
+
+/// Create a search input widget
+fn create_search_input(input: &str, placeholder: &str) -> Paragraph<'static> {
+    let display = if input.is_empty() {
+        placeholder.to_string()
+    } else {
+        format!("{}_", input)
+    };
+    let style = if input.is_empty() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    Paragraph::new(display)
+        .style(style)
+        .block(Block::default().borders(Borders::ALL).title("Query"))
+        .wrap(ratatui::widgets::Wrap { trim: false })
+}
+
+/// Generate preview text for live grep matches
+fn generate_grep_preview(
+    selected_idx: Option<usize>,
+    filtered_paths: &[Option<PathBuf>],
+    grep_matches: &[crate::search::MatchInfo],
+) -> String {
+    let idx = match selected_idx {
+        Some(i) => i,
+        None => return "Select a file to see matches".to_string(),
+    };
+
+    let selected_path = match filtered_paths.get(idx).and_then(|p| p.as_ref()) {
+        Some(p) => p,
+        None => return "Select a file to see matches".to_string(),
+    };
+
+    let file_matches: Vec<&crate::search::MatchInfo> = grep_matches
+        .iter()
+        .filter(|m| &m.file_path == selected_path)
+        .collect();
+
+    if file_matches.is_empty() {
+        return "No matches found".to_string();
+    }
+
+    file_matches
+        .iter()
+        .take(10)
+        .map(|m| {
+            let line = if m.line_content.len() > 80 {
+                format!("{}...", &m.line_content[..77])
+            } else {
+                m.line_content.clone()
+            };
+            format!("Line {}: {}", m.line_number, line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Start a search with the given mode
+fn start_search(app: &mut App, mode: SearchMode) {
+    app.is_searching = true;
+    app.search_input.clear();
+    app.apply_search_filter(mode);
+}
+
+/// Handle search input events
+fn handle_search_input(key: KeyCode, app: &mut App) {
+    match key {
+        KeyCode::Esc => {
+            // Cancel search
+            app.is_searching = false;
+            app.search_input.clear();
+            app.filtered_browse_items.clear();
+            app.filtered_browse_paths.clear();
+            app.grep_matches.clear();
+            app.load_browse_items();
+        }
+        KeyCode::Enter => {
+            // In live grep, Enter opens the selected file; in fuzzy search, it exits search mode
+            if app.search_mode == SearchMode::LiveGrep {
+                if let Some(file_path) = app.get_selected_file_path() {
+                    let _ = launch_editor(file_path, &app.settings.editor);
+                    app.current_file = Some(file_path.to_string_lossy().to_string());
+                    app.load_browse_items();
+                }
+            } else {
+                app.is_searching = false;
+            }
+        }
+        KeyCode::Backspace => {
+            app.search_input.pop();
+            app.apply_search_filter(app.search_mode);
+        }
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            app.browse_up();
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            app.browse_down();
+        }
+        KeyCode::Char(c) => {
+            app.search_input.push(c);
+            app.apply_search_filter(app.search_mode);
+        }
+        _ => {}
+    }
+}
+
 /// Main UI function that dispatches to screen-specific renderers
 pub fn ui(f: &mut Frame, app: &mut App) {
     match app.current_screen {
@@ -175,6 +294,85 @@ fn render_main_screen(f: &mut Frame, _app: &mut App) {
     f.render_widget(footer, chunks[2]);
 }
 
+/// Render search overlay based on search mode
+fn render_search_overlay(f: &mut Frame, app: &mut App) {
+    match app.search_mode {
+        SearchMode::LiveGrep => {
+            let search_area = centered_rect(90, 80, f.area());
+            let search_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Title
+                    Constraint::Length(3), // Input
+                    Constraint::Min(0),    // Content area
+                ])
+                .split(search_area);
+
+            let content_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(50), // File list
+                    Constraint::Percentage(50), // Preview
+                ])
+                .split(search_chunks[2]);
+
+            f.render_widget(Clear, search_area);
+            f.render_widget(
+                create_search_title("Content Search (Live Grep)"),
+                search_chunks[0],
+            );
+            f.render_widget(
+                create_search_input(&app.search_input, "Enter search query..."),
+                search_chunks[1],
+            );
+
+            // File list with matches
+            let file_items: Vec<ListItem> = app
+                .filtered_browse_items
+                .iter()
+                .map(|(text, _)| ListItem::new(text.as_str()))
+                .collect();
+            let file_list = List::new(file_items)
+                .block(Block::default().borders(Borders::ALL).title("Files with Matches"))
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                );
+            f.render_stateful_widget(file_list, content_chunks[0], &mut app.browse_list_state);
+
+            // Preview window
+            let preview_text = generate_grep_preview(
+                app.browse_list_state.selected(),
+                &app.filtered_browse_paths,
+                &app.grep_matches,
+            );
+            let preview = Paragraph::new(preview_text)
+                .style(Style::default().fg(Color::White))
+                .block(Block::default().borders(Borders::ALL).title("Match Preview"))
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            f.render_widget(preview, content_chunks[1]);
+        }
+        SearchMode::FuzzySearch => {
+            let search_area = centered_rect(75, 15, f.area());
+            let search_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Title
+                    Constraint::Length(5), // Input
+                ])
+                .split(search_area);
+
+            f.render_widget(Clear, search_area);
+            f.render_widget(create_search_title("Filename Search"), search_chunks[0]);
+            f.render_widget(
+                create_search_input(&app.search_input, "Enter search query..."),
+                search_chunks[1],
+            );
+        }
+    }
+}
+
 /// Browsing screen - shows list of notes
 fn render_browsing_screen(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -219,7 +417,10 @@ fn render_browsing_screen(f: &mut Frame, app: &mut App) {
 
     // Footer
     let help_text = if app.is_searching {
-        "Type to search | Esc: Cancel Search | Enter: Open | Q: Quit"
+        match app.search_mode {
+            SearchMode::LiveGrep => "↑↓/j/k: Navigate | Type to search | Enter: Open File | Esc: Cancel | Q: Quit",
+            SearchMode::FuzzySearch => "Type to search | Esc: Cancel Search | Enter: Exit Search | Q: Quit"
+        }
     } else {
         "↑↓ Navigate | /: Search | Space/→: Expand/Collapse | Enter: Open | N: New Note | F: New Folder | Esc: Back | Q: Quit"
     };
@@ -231,43 +432,7 @@ fn render_browsing_screen(f: &mut Frame, app: &mut App) {
 
     // Render floating search window if searching
     if app.is_searching {
-        let search_area = centered_rect(75, 15, f.area());
-        let search_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Title
-                Constraint::Length(5), // Input (larger to see more text)
-            ])
-            .split(search_area);
-
-        // Search title
-        let search_title = Paragraph::new("Search")
-            .style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
-        f.render_widget(Clear, search_area);
-        f.render_widget(search_title, search_chunks[0]);
-
-        // Search input - show full query with cursor
-        let input_display = if app.search_input.is_empty() {
-            "Enter search query...".to_string()
-        } else {
-            format!("{}_", app.search_input)
-        };
-        let input_style = if app.search_input.is_empty() {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let search_input = Paragraph::new(input_display)
-            .style(input_style)
-            .block(Block::default().borders(Borders::ALL).title("Query"))
-            .wrap(ratatui::widgets::Wrap { trim: false });
-        f.render_widget(search_input, search_chunks[1]);
+        render_search_overlay(f, app);
     }
 }
 
@@ -556,32 +721,7 @@ pub fn run_app<B: ratatui::backend::Backend>(
                 },
                 CurrentScreen::Browsing => {
                     if app.is_searching {
-                        // Handle search input
-                        match key.code {
-                            KeyCode::Esc => {
-                                // Cancel search
-                                app.is_searching = false;
-                                app.search_input.clear();
-                                app.filtered_browse_items.clear();
-                                app.filtered_browse_paths.clear();
-                                // Reload to show all items
-                                app.load_browse_items();
-                            }
-                            KeyCode::Enter => {
-                                // Exit search mode but keep results
-                                app.is_searching = false;
-                            }
-                            KeyCode::Backspace => {
-                                app.search_input.pop();
-                                app.apply_search_filter(SearchMode::FuzzySearch);
-                            }
-                            KeyCode::Char(c) => {
-                                // Add character to search input
-                                app.search_input.push(c);
-                                app.apply_search_filter(SearchMode::FuzzySearch);
-                            }
-                            _ => {}
-                        }
+                        handle_search_input(key.code, app);
                     } else {
                         // Normal browse mode
                         match key.code {
@@ -592,16 +732,10 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                 app.current_screen = CurrentScreen::Exiting;
                             }
                             KeyCode::Char('/') => {
-                                // Start search mode
-                                app.is_searching = true;
-                                app.search_input.clear();
-                                app.apply_search_filter(SearchMode::FuzzySearch);
+                                start_search(app, SearchMode::FuzzySearch);
                             }
                             KeyCode::Char('?') => {
-                                // Start search mode
-                                app.is_searching = true;
-                                app.search_input.clear();
-                                app.apply_search_filter(SearchMode::LiveGrep);
+                                start_search(app, SearchMode::LiveGrep);
                             }
                             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
                                 app.browse_up();
