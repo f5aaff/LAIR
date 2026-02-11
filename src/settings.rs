@@ -28,25 +28,23 @@ impl Settings {
     fn settings_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("escritoire")
+            .join("LAIR")
             .join("settings.json")
     }
 
     /// Load settings from JSON file, or return default if file doesn't exist
     pub fn load() -> Self {
         let path = Self::settings_path();
-        
+
         if path.exists() {
             match fs::read_to_string(&path) {
-                Ok(content) => {
-                    match serde_json::from_str::<Settings>(&content) {
-                        Ok(settings) => settings,
-                        Err(e) => {
-                            eprintln!("Error parsing settings file: {}. Using defaults.", e);
-                            Self::default()
-                        }
+                Ok(content) => match serde_json::from_str::<Settings>(&content) {
+                    Ok(settings) => settings,
+                    Err(e) => {
+                        eprintln!("Error parsing settings file: {}. Using defaults.", e);
+                        Self::default()
                     }
-                }
+                },
                 Err(e) => {
                     eprintln!("Error reading settings file: {}. Using defaults.", e);
                     Self::default()
@@ -65,7 +63,7 @@ impl Settings {
     /// Save settings to JSON file
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let path = Self::settings_path();
-        
+
         // Create directory if it doesn't exist
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -73,10 +71,10 @@ impl Settings {
 
         // Serialize to JSON
         let json = serde_json::to_string_pretty(self)?;
-        
+
         // Write to file
         fs::write(&path, json)?;
-        
+
         Ok(())
     }
 }
