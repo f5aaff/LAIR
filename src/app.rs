@@ -11,6 +11,7 @@ pub enum CurrentScreen {
     CreatingFolder,
     Exiting,
     Settings,
+    GroupingNotes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,6 +48,11 @@ pub struct App {
     pub grep_matches: Vec<crate::search::MatchInfo>, // Match information for live grep
     pub autocomplete_suggestions: Vec<String>,      // Folder suggestions for autocomplete
     pub autocomplete_selected: Option<usize>,       // Selected suggestion index
+    pub is_grouping: bool,                          // Whether grouping operation is in progress
+    pub grouping_progress: Option<String>,          // Progress message for grouping
+    pub grouping_result: Option<Vec<crate::grouping::NoteGroup>>, // Result of grouping operation
+    pub grouping_selected: Option<usize>,           // Selected group index for preview
+    pub grouping_applied: bool,                     // Whether groups have been applied to filesystem
 }
 impl App {
     pub fn new() -> App {
@@ -76,6 +82,11 @@ impl App {
             grep_matches: Vec::new(),
             autocomplete_suggestions: Vec::new(),
             autocomplete_selected: None,
+            is_grouping: false,
+            grouping_progress: None,
+            grouping_result: None,
+            grouping_selected: None,
+            grouping_applied: false,
         }
     }
 

@@ -1,5 +1,6 @@
 mod app;
 mod browse;
+mod grouping;
 mod search;
 mod settings;
 mod ui;

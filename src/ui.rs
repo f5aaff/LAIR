@@ -274,6 +274,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         CurrentScreen::CreatingFolder => render_creating_folder_screen(f, app),
         CurrentScreen::Settings => render_settings_screen(f, app),
         CurrentScreen::Exiting => render_exiting_screen(f, app),
+        CurrentScreen::GroupingNotes => render_grouping_screen(f, app),
     }
 }
 
@@ -462,7 +463,7 @@ fn render_browsing_screen(f: &mut Frame, app: &mut App) {
             }
         }
     } else {
-        "↑↓ Navigate | /: Search | Space/→: Expand/Collapse | Enter: Open | N: New Note | F: New Folder | Esc: Back | Q: Quit"
+        "↑↓ Navigate | /: Search | Space/→: Expand/Collapse | Enter: Open | N: New Note | F: New Folder | G: Group Notes | Esc: Back | Q: Quit"
     };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
@@ -617,6 +618,148 @@ fn render_creating_folder_screen(f: &mut Frame, app: &mut App) {
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, popup_chunks[2]);
+}
+
+/// Grouping screen - shows confirmation, preview, and progress for note grouping
+fn render_grouping_screen(f: &mut Frame, app: &mut App) {
+    let popup_area = centered_rect(85, 85, f.area());
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Title
+            Constraint::Min(5),     // Content area
+            Constraint::Length(3),  // Help text
+        ])
+        .split(popup_area);
+    
+    f.render_widget(Clear, popup_area);
+    
+    let title = Paragraph::new("Group Notes by Similarity")
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title, chunks[0]);
+    
+    if app.is_grouping {
+        // Show progress
+        let status_text = format!(
+            "{}\n\nPlease wait...",
+            app.grouping_progress.as_deref().unwrap_or("Processing...")
+        );
+        let status = Paragraph::new(status_text)
+            .style(Style::default().fg(Color::White))
+            .block(Block::default().borders(Borders::ALL).title("Status"))
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        f.render_widget(status, chunks[1]);
+    } else if let Some(groups) = &app.grouping_result {
+        // Show groups preview with navigation
+        let content_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(40), // Group list
+                Constraint::Percentage(60), // Group details
+            ])
+            .split(chunks[1]);
+        
+        // Group list
+        let group_items: Vec<ListItem> = groups
+            .iter()
+            .enumerate()
+            .map(|(idx, group)| {
+                let style = if app.grouping_selected == Some(idx) {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(format!("{}. {} ({} notes)", idx + 1, group.name, group.notes.len()))
+                    .style(style)
+            })
+            .collect();
+        
+        let group_list = List::new(group_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Groups ({})", groups.len())),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
+        
+        // Create a temporary ListState for rendering
+        let mut list_state = ratatui::widgets::ListState::default();
+        list_state.select(app.grouping_selected);
+        f.render_stateful_widget(group_list, content_chunks[0], &mut list_state);
+        
+        // Group details
+        let details_text = if let Some(selected_idx) = app.grouping_selected {
+            if let Some(group) = groups.get(selected_idx) {
+                let notes_list: String = group
+                    .notes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, path)| {
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        format!("  {}. {}", i + 1, name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Group: {}\n\nNotes in this group:\n{}", group.name, notes_list)
+            } else {
+                "Select a group to see details".to_string()
+            }
+        } else if !groups.is_empty() {
+            format!(
+                "{} groups found.\n\nUse ↑↓ to navigate groups.\n\nPress Enter to apply grouping.\nPress Esc to cancel.",
+                groups.len()
+            )
+        } else {
+            "No groups found. Press Esc to cancel.".to_string()
+        };
+        
+        let details = Paragraph::new(details_text)
+            .style(Style::default().fg(Color::White))
+            .block(Block::default().borders(Borders::ALL).title("Group Details"))
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        f.render_widget(details, content_chunks[1]);
+    } else {
+        // Initial screen
+        let status_text = "Press Enter to compute groups.\n\nThis will:\n  1. Flatten all notes to root directory\n  2. Analyze content similarity\n  3. Show groups for review\n  4. Apply grouping if confirmed\n\nWarning: This will reorganize your notes!".to_string();
+        let status = Paragraph::new(status_text)
+            .style(Style::default().fg(Color::White))
+            .block(Block::default().borders(Borders::ALL).title("Status"))
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        f.render_widget(status, chunks[1]);
+    }
+    
+    let help = if app.is_grouping {
+        "Processing... Please wait"
+    } else if app.grouping_result.is_some() {
+        if app.grouping_applied {
+            "Esc: Return to Browse"
+        } else {
+            "↑↓: Navigate | Enter: Apply Grouping | Esc: Cancel"
+        }
+    } else {
+        "Enter: Compute Groups | Esc: Cancel"
+    };
+    
+    let help_widget = Paragraph::new(help)
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(help_widget, chunks[2]);
 }
 
 fn render_settings_screen(f: &mut Frame, app: &mut App) {
@@ -854,8 +997,95 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                 app.folder_name_input.clear();
                                 app.current_screen = CurrentScreen::CreatingFolder;
                             }
+                            KeyCode::Char('g') | KeyCode::Char('G') => {
+                                // Start grouping operation
+                                app.current_screen = CurrentScreen::GroupingNotes;
+                                app.is_grouping = false;
+                                app.grouping_progress = None;
+                                app.grouping_result = None;
+                                app.grouping_selected = None;
+                                app.grouping_applied = false;
+                            }
                             _ => {}
                         }
+                    }
+                }
+                CurrentScreen::GroupingNotes => {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if app.is_grouping {
+                                // Still processing, ignore
+                            } else if let Some(groups) = &app.grouping_result {
+                                // Groups computed, apply them (flatten and organize)
+                                if !app.grouping_applied && !groups.is_empty() {
+                                    match crate::grouping::apply_grouping(&app.settings, groups) {
+                                        Ok(_) => {
+                                            app.grouping_applied = true;
+                                            app.grouping_progress = Some(format!("Applied {} groups", groups.len()));
+                                            // Reload browse items to show new structure
+                                            app.load_browse_items();
+                                        }
+                                        Err(e) => {
+                                            app.grouping_progress = Some(format!("Error applying: {}", e));
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Compute groups
+                                app.is_grouping = true;
+                                app.grouping_progress = Some("Flattening notes...".to_string());
+                                
+                                let config = crate::grouping::GroupingConfig::default();
+                                match crate::grouping::compute_groups(&app.settings, config) {
+                                    Ok(groups) => {
+                                        let num_groups = groups.len();
+                                        app.grouping_progress = Some(format!("Computed {} groups", num_groups));
+                                        app.grouping_result = Some(groups);
+                                        app.grouping_selected = if num_groups > 0 { Some(0) } else { None };
+                                        app.grouping_applied = false;
+                                        app.is_grouping = false;
+                                    }
+                                    Err(e) => {
+                                        app.grouping_progress = Some(format!("Error: {}", e));
+                                        app.is_grouping = false;
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Up => {
+                            if let Some(groups) = &app.grouping_result {
+                                if !groups.is_empty() {
+                                    let new_idx = match app.grouping_selected {
+                                        Some(idx) if idx > 0 => Some(idx - 1),
+                                        Some(_) => Some(0),
+                                        None => Some(0),
+                                    };
+                                    app.grouping_selected = new_idx;
+                                }
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let Some(groups) = &app.grouping_result {
+                                if !groups.is_empty() {
+                                    let max_idx = groups.len() - 1;
+                                    let new_idx = match app.grouping_selected {
+                                        Some(idx) if idx < max_idx => Some(idx + 1),
+                                        Some(_) => Some(max_idx),
+                                        None => Some(0),
+                                    };
+                                    app.grouping_selected = new_idx;
+                                }
+                            }
+                        }
+                        KeyCode::Esc => {
+                            app.current_screen = CurrentScreen::Browsing;
+                            app.is_grouping = false;
+                            app.grouping_progress = None;
+                            app.grouping_result = None;
+                            app.grouping_selected = None;
+                            app.grouping_applied = false;
+                        }
+                        _ => {}
                     }
                 }
                 CurrentScreen::Editing => {
