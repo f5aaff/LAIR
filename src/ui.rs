@@ -12,9 +12,9 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
+use std::fs;
 use std::io::{self, Error, Write};
 use std::path::PathBuf;
-use std::fs;
 use std::process::Command;
 
 /// Launch editor to edit a file, then return to the TUI
@@ -43,9 +43,10 @@ fn launch_editor(file_path: &std::path::Path, editor: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Create a new note file with date-based organization
+/// Create a new note file
 /// Returns the full path to the created note file
-/// If target_dir is provided, creates the note in that directory instead of date-based folder
+/// If note_name contains a path (e.g., "x/y/note.md"), creates directories as needed
+/// Default is to create the note in the root notes directory
 fn create_note_file(
     notes_dir: &str,
     note_name: Option<&str>,
@@ -53,41 +54,68 @@ fn create_note_file(
     target_dir: Option<&PathBuf>,
 ) -> io::Result<PathBuf> {
     let now = chrono::Utc::now();
+    let base_dir = PathBuf::from(notes_dir);
 
-    // Determine the target directory
-    let date_dir = if let Some(target) = target_dir {
-        // Use provided target directory
+    // Determine the target directory - default to root if no target_dir provided
+    let target_directory = if let Some(target) = target_dir {
         target.clone()
     } else {
-        // Use date-based folder structure (YY-MM-DD)
-        let base_dir = PathBuf::from(notes_dir);
-        let date_folder = now.format("%y-%m-%d").to_string();
-        base_dir.join(&date_folder)
+        // Default to root directory
+        base_dir.clone()
     };
 
-    // Ensure the date directory exists
-    fs::create_dir_all(&date_dir)?;
-
-    // Determine the file name
-    let file_name = if let Some(name) = note_name {
+    // Determine the file name and path
+    let (file_name, dir_path) = if let Some(name) = note_name {
         let trimmed = name.trim();
         if trimmed.is_empty() {
-            // Empty name, use timestamp
-            format!("notes-{}.{}", now.format("%y-%m-%d_%H-%M-%S"), file_format)
+            // Empty name, use timestamp in target directory
+            let file_name = format!("notes-{}.{}", now.format("%y-%m-%d_%H-%M-%S"), file_format);
+            (file_name, target_directory)
         } else {
-            // Use provided name, ensure it has the correct extension
-            if trimmed.ends_with(&format!(".{}", file_format)) {
-                trimmed.to_string()
+            // Check if the name contains a path separator
+            if trimmed.contains('/') {
+                // Split path and filename
+                let path = PathBuf::from(trimmed);
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        format!("notes-{}.{}", now.format("%y-%m-%d_%H-%M-%S"), file_format)
+                    });
+
+                // Ensure file has correct extension
+                let file_name = if file_name.ends_with(&format!(".{}", file_format)) {
+                    file_name
+                } else {
+                    format!("{}.{}", file_name, file_format)
+                };
+
+                // Get directory part (parent of the file in the path)
+                let dir_part = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                let dir_path = base_dir.join(&dir_part);
+
+                (file_name, dir_path)
             } else {
-                format!("{}.{}", trimmed, file_format)
+                // Simple filename, use target directory
+                let file_name = if trimmed.ends_with(&format!(".{}", file_format)) {
+                    trimmed.to_string()
+                } else {
+                    format!("{}.{}", trimmed, file_format)
+                };
+                (file_name, target_directory)
             }
         }
     } else {
-        // No name provided, use timestamp
-        format!("notes-{}.{}", now.format("%y-%m-%d_%H-%M-%S"), file_format)
+        // No name provided, use timestamp in target directory
+        let file_name = format!("notes-{}.{}", now.format("%y-%m-%d_%H-%M-%S"), file_format);
+        (file_name, target_directory)
     };
 
-    let file_path = date_dir.join(&file_name);
+    // Ensure the directory exists
+    fs::create_dir_all(&dir_path)?;
+
+    let file_path = dir_path.join(&file_name);
 
     // Create empty file if it doesn't exist
     if !file_path.exists() {
@@ -223,10 +251,10 @@ fn handle_search_input(key: KeyCode, app: &mut App) {
             app.search_input.pop();
             app.apply_search_filter(app.search_mode);
         }
-        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+        KeyCode::Up => {
             app.browse_up();
         }
-        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+        KeyCode::Down => {
             app.browse_down();
         }
         KeyCode::Char(c) => {
@@ -333,7 +361,11 @@ fn render_search_overlay(f: &mut Frame, app: &mut App) {
                 .map(|(text, _)| ListItem::new(text.as_str()))
                 .collect();
             let file_list = List::new(file_items)
-                .block(Block::default().borders(Borders::ALL).title("Files with Matches"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Files with Matches"),
+                )
                 .highlight_style(
                     Style::default()
                         .fg(Color::Yellow)
@@ -349,7 +381,11 @@ fn render_search_overlay(f: &mut Frame, app: &mut App) {
             );
             let preview = Paragraph::new(preview_text)
                 .style(Style::default().fg(Color::White))
-                .block(Block::default().borders(Borders::ALL).title("Match Preview"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Match Preview"),
+                )
                 .wrap(ratatui::widgets::Wrap { trim: false });
             f.render_widget(preview, content_chunks[1]);
         }
@@ -418,8 +454,12 @@ fn render_browsing_screen(f: &mut Frame, app: &mut App) {
     // Footer
     let help_text = if app.is_searching {
         match app.search_mode {
-            SearchMode::LiveGrep => "↑↓/j/k: Navigate | Type to search | Enter: Open File | Esc: Cancel | Q: Quit",
-            SearchMode::FuzzySearch => "Type to search | Esc: Cancel Search | Enter: Exit Search | Q: Quit"
+            SearchMode::LiveGrep => {
+                "↑↓/j/k: Navigate | Type to search | Enter: Open File | Esc: Cancel | Q: Quit"
+            }
+            SearchMode::FuzzySearch => {
+                "Type to search | Esc: Cancel Search | Enter: Exit Search | Q: Quit"
+            }
         }
     } else {
         "↑↓ Navigate | /: Search | Space/→: Expand/Collapse | Enter: Open | N: New Note | F: New Folder | Esc: Back | Q: Quit"
@@ -436,23 +476,24 @@ fn render_browsing_screen(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// New Note screen - shows popup dialog for entering note name
+/// New Note screen - shows popup dialog for entering note name with autocomplete
 fn render_editing_screen(f: &mut Frame, app: &mut App) {
-    // Create a centered popup dialog
-    let popup_area = centered_rect(60, 30, f.area());
+    // Create a centered popup dialog - larger to accommodate suggestions
+    let popup_area = centered_rect(70, 50, f.area());
 
     // Split the popup into sections
     let popup_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Title
-            Constraint::Length(5), // Input field
-            Constraint::Length(3), // Help text
+            Constraint::Length(3),  // Title
+            Constraint::Length(5),  // Input field
+            Constraint::Min(5),     // Suggestions list
+            Constraint::Length(3),  // Help text
         ])
         .split(popup_area);
 
     // Title
-    let title = Paragraph::new("New Note")
+    let title = Paragraph::new("New Note (default: root directory)")
         .style(
             Style::default()
                 .fg(Color::Cyan)
@@ -465,7 +506,7 @@ fn render_editing_screen(f: &mut Frame, app: &mut App) {
 
     // Input field - show the current input with a cursor indicator
     let input_display = if app.note_name_input.is_empty() {
-        "Enter note name...".to_string()
+        "Enter note name or path (e.g., folder/note.md)...".to_string()
     } else {
         format!("{}_", app.note_name_input)
     };
@@ -476,16 +517,54 @@ fn render_editing_screen(f: &mut Frame, app: &mut App) {
     };
     let input = Paragraph::new(input_display)
         .style(input_style)
-        .block(Block::default().borders(Borders::ALL).title("Note Name"));
+        .block(Block::default().borders(Borders::ALL).title("Note Name/Path"))
+        .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(input, popup_chunks[1]);
 
+    // Autocomplete suggestions
+    if !app.autocomplete_suggestions.is_empty() {
+        let suggestion_items: Vec<ListItem> = app
+            .autocomplete_suggestions
+            .iter()
+            .enumerate()
+            .map(|(idx, suggestion)| {
+                let style = if app.autocomplete_selected == Some(idx) {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(format!("📁 {}", suggestion)).style(style)
+            })
+            .collect();
+
+        let suggestions_list = List::new(suggestion_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Folder Suggestions (Tab to accept)"),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
+        f.render_widget(suggestions_list, popup_chunks[2]);
+    } else {
+        let empty_text = Paragraph::new("No folder suggestions")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title("Folder Suggestions"));
+        f.render_widget(empty_text, popup_chunks[2]);
+    }
+
     // Help text
-    let help_text = "Enter: Create & Edit | Esc: Cancel";
+    let help_text = "Enter: Create & Edit | Tab: Accept suggestion | ↑↓: Navigate | Esc: Cancel";
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
-    f.render_widget(footer, popup_chunks[2]);
+    f.render_widget(footer, popup_chunks[3]);
 }
 
 /// New Folder screen - shows popup dialog for entering folder name
@@ -707,6 +786,8 @@ pub fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('n') | KeyCode::Char('N') => {
                         app.current_screen = CurrentScreen::Editing;
                         app.note_name_input.clear(); // Clear input when entering
+                        app.target_directory = None; // Default to root directory
+                        app.update_autocomplete_suggestions();
                     }
                     KeyCode::Char('b') | KeyCode::Char('B') => {
                         app.load_browse_items();
@@ -746,10 +827,12 @@ pub fn run_app<B: ratatui::backend::Backend>(
                             KeyCode::Enter => {
                                 // Open the selected file
                                 if let Some(file_path) = app.get_selected_file_path() {
-                                    if let Err(_e) = launch_editor(file_path, &app.settings.editor) {
+                                    if let Err(_e) = launch_editor(file_path, &app.settings.editor)
+                                    {
                                         // Error launching editor - continue in TUI
                                     }
-                                    app.current_file = Some(file_path.to_string_lossy().to_string());
+                                    app.current_file =
+                                        Some(file_path.to_string_lossy().to_string());
                                     // Reload browse items to reflect any changes made in the editor
                                     app.load_browse_items();
                                 }
@@ -762,6 +845,7 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                 // Create new note in selected directory
                                 app.target_directory = Some(app.get_selected_directory());
                                 app.note_name_input.clear();
+                                app.update_autocomplete_suggestions();
                                 app.current_screen = CurrentScreen::Editing;
                             }
                             KeyCode::Char('f') | KeyCode::Char('F') => {
@@ -794,7 +878,8 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                     let target_dir = app.target_directory.take();
 
                                     // Launch editor with the new note
-                                    if let Err(_e) = launch_editor(&file_path, &app.settings.editor) {
+                                    if let Err(_e) = launch_editor(&file_path, &app.settings.editor)
+                                    {
                                         // Error launching editor - continue in TUI
                                     }
 
@@ -812,7 +897,10 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                         app.current_screen = CurrentScreen::Main;
                                     }
                                     app.note_name_input.clear();
-                                    app.current_file = Some(file_path.to_string_lossy().to_string());
+                                    app.autocomplete_suggestions.clear();
+                                    app.autocomplete_selected = None;
+                                    app.current_file =
+                                        Some(file_path.to_string_lossy().to_string());
                                 }
                                 Err(e) => {
                                     eprintln!("Error creating note file: {}", e);
@@ -820,9 +908,46 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
+                        KeyCode::Tab => {
+                            // Accept selected autocomplete suggestion
+                            if let Some(selected_idx) = app.autocomplete_selected {
+                                if let Some(suggestion) = app.autocomplete_suggestions.get(selected_idx) {
+                                    app.note_name_input = suggestion.clone();
+                                    app.update_autocomplete_suggestions();
+                                }
+                            } else if !app.autocomplete_suggestions.is_empty() {
+                                // If nothing selected, use first suggestion
+                                app.note_name_input = app.autocomplete_suggestions[0].clone();
+                                app.update_autocomplete_suggestions();
+                            }
+                        }
+                        KeyCode::Up => {
+                            // Navigate up in autocomplete suggestions
+                            if !app.autocomplete_suggestions.is_empty() {
+                                let new_idx = match app.autocomplete_selected {
+                                    Some(idx) if idx > 0 => Some(idx - 1),
+                                    Some(_) => Some(0),
+                                    None => Some(0),
+                                };
+                                app.autocomplete_selected = new_idx;
+                            }
+                        }
+                        KeyCode::Down => {
+                            // Navigate down in autocomplete suggestions
+                            if !app.autocomplete_suggestions.is_empty() {
+                                let max_idx = app.autocomplete_suggestions.len() - 1;
+                                let new_idx = match app.autocomplete_selected {
+                                    Some(idx) if idx < max_idx => Some(idx + 1),
+                                    Some(_) => Some(max_idx),
+                                    None => Some(0),
+                                };
+                                app.autocomplete_selected = new_idx;
+                            }
+                        }
                         KeyCode::Backspace => {
                             // Remove last character
                             app.note_name_input.pop();
+                            app.update_autocomplete_suggestions();
                         }
                         KeyCode::Esc => {
                             // Cancel and return to previous screen
@@ -832,13 +957,16 @@ pub fn run_app<B: ratatui::backend::Backend>(
                                 app.current_screen = CurrentScreen::Main;
                             }
                             app.note_name_input.clear();
+                            app.autocomplete_suggestions.clear();
+                            app.autocomplete_selected = None;
                             app.target_directory = None;
                             app.current_file = None;
                         }
                         KeyCode::Char(c) => {
-                            // Add character to input (allow alphanumeric, spaces, dashes, underscores, dots)
-                            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
+                            // Add character to input (allow alphanumeric, spaces, dashes, underscores, dots, slashes)
+                            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' || c == '/' {
                                 app.note_name_input.push(c);
+                                app.update_autocomplete_suggestions();
                             }
                         }
                         _ => {}

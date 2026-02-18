@@ -89,19 +89,45 @@ pub fn get_files_as_list_items_with_paths(
     expanded_folders: &HashSet<PathBuf>,
 ) -> Result<(Vec<(String, bool)>, Vec<Option<PathBuf>>), Box<dyn std::error::Error>> {
     let base_dir = Path::new(&settings.notes_directory);
-    let pattern = base_dir.join("**/*").to_string_lossy().to_string();
-
+    
     let mut items: Vec<(String, bool)> = Vec::new(); // (display_text, is_file)
     let mut paths: Vec<Option<PathBuf>> = Vec::new();
 
-    // Collect all paths first
+    // Collect all paths - recursively read directory tree to ensure we get everything
     let mut all_paths: Vec<PathBuf> = Vec::new();
-    for entry in glob::glob(&pattern)? {
-        let path = entry?;
-        if path != base_dir {
-            all_paths.push(path);
+    
+    // Helper function to recursively collect all paths
+    fn collect_paths(dir: &Path, base_dir: &Path, paths: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        if !dir.exists() || !dir.is_dir() {
+            return Ok(());
         }
+        
+        let entries = std::fs::read_dir(dir)?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            
+            // Skip the base directory itself
+            if path == base_dir {
+                continue;
+            }
+            
+            // Add this path
+            if !paths.contains(&path) {
+                paths.push(path.clone());
+            }
+            
+            // If it's a directory, recurse into it
+            if path.is_dir() {
+                collect_paths(&path, base_dir, paths)?;
+            }
+        }
+        
+        Ok(())
     }
+    
+    // Start collecting from the base directory
+    collect_paths(base_dir, base_dir, &mut all_paths)?;
 
     // Sort paths to ensure consistent ordering
     all_paths.sort();
@@ -166,4 +192,27 @@ pub fn make_new_folder(
 
     create_dir_all(new_folder_path)?;
     Ok(())
+}
+
+/// Get all directory paths from the notes directory, returning relative paths from notes root
+/// Returns paths like "folder1", "folder1/subfolder", etc.
+pub fn get_all_directories(settings: &Settings) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let base_dir = Path::new(&settings.notes_directory);
+    let pattern = base_dir.join("**/*").to_string_lossy().to_string();
+
+    let mut directories: Vec<String> = Vec::new();
+    for entry in glob::glob(&pattern)? {
+        let path = entry?;
+        if path != base_dir && path.is_dir() {
+            // Get relative path from base_dir
+            if let Ok(rel_path) = path.strip_prefix(base_dir) {
+                if let Some(rel_str) = rel_path.to_str() {
+                    directories.push(rel_str.to_string());
+                }
+            }
+        }
+    }
+
+    directories.sort();
+    Ok(directories)
 }

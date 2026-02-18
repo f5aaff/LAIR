@@ -45,6 +45,8 @@ pub struct App {
     pub filtered_browse_items: Vec<(String, bool)>, // Filtered items based on search
     pub filtered_browse_paths: Vec<Option<PathBuf>>, // Filtered paths based on search
     pub grep_matches: Vec<crate::search::MatchInfo>, // Match information for live grep
+    pub autocomplete_suggestions: Vec<String>,      // Folder suggestions for autocomplete
+    pub autocomplete_selected: Option<usize>,       // Selected suggestion index
 }
 impl App {
     pub fn new() -> App {
@@ -72,6 +74,8 @@ impl App {
             filtered_browse_items: Vec::new(),
             filtered_browse_paths: Vec::new(),
             grep_matches: Vec::new(),
+            autocomplete_suggestions: Vec::new(),
+            autocomplete_selected: None,
         }
     }
 
@@ -287,7 +291,93 @@ impl App {
         Ok(())
     }
 
-    /// Toggle expand/collapse state of the selected folder
+    /// Update autocomplete suggestions based on current note name input
+    pub fn update_autocomplete_suggestions(&mut self) {
+        self.autocomplete_suggestions.clear();
+        self.autocomplete_selected = None;
+
+        let input = self.note_name_input.trim();
+        
+        // Get all directories
+        let dirs = match browse::get_all_directories(&self.settings) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        if input.is_empty() {
+            // If input is empty, show top-level directories only
+            let base_dir = Path::new(&self.settings.notes_directory);
+            for dir in dirs {
+                // Only show directories that are direct children of base_dir
+                let dir_path = base_dir.join(&dir);
+                if let Some(parent) = dir_path.parent() {
+                    if parent == base_dir {
+                        self.autocomplete_suggestions.push(format!("{}/", dir));
+                    }
+                }
+            }
+            // Limit to 10 suggestions
+            if self.autocomplete_suggestions.len() > 10 {
+                self.autocomplete_suggestions.truncate(10);
+            }
+            return;
+        }
+
+        // Check if input contains a path separator
+        let (prefix, suffix) = if let Some(last_slash) = input.rfind('/') {
+            let (p, s) = input.split_at(last_slash + 1);
+            (p.trim_end_matches('/'), s)
+        } else {
+            ("", input)
+        };
+
+        let base_dir = Path::new(&self.settings.notes_directory);
+        let prefix_path = if prefix.is_empty() {
+            base_dir.to_path_buf()
+        } else {
+            base_dir.join(prefix)
+        };
+
+        // Find directories that match the prefix and suffix
+        for dir in dirs {
+            let dir_path = base_dir.join(&dir);
+            
+            // Check if this directory is under the prefix path
+            if dir_path.starts_with(&prefix_path) {
+                // Get the relative path from prefix
+                if let Ok(rel_path) = dir_path.strip_prefix(&prefix_path) {
+                    if let Some(rel_str) = rel_path.to_str() {
+                        if !rel_str.is_empty() {
+                            // Get the first component of the relative path
+                            let first_component = rel_path.components().next()
+                                .and_then(|c| c.as_os_str().to_str())
+                                .unwrap_or("");
+                            
+                            // Check if it matches the suffix (case-insensitive)
+                            if first_component.to_lowercase().starts_with(&suffix.to_lowercase()) {
+                                // Build the suggestion
+                                let suggestion = if prefix.is_empty() {
+                                    format!("{}/", first_component)
+                                } else {
+                                    format!("{}/{}/", prefix, first_component)
+                                };
+                                
+                                if !self.autocomplete_suggestions.contains(&suggestion) {
+                                    self.autocomplete_suggestions.push(suggestion);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Limit to 10 suggestions
+        if self.autocomplete_suggestions.len() > 10 {
+            self.autocomplete_suggestions.truncate(10);
+        }
+    }
+
     pub fn toggle_folder_expansion(&mut self) {
         let selected = match self.browse_list_state.selected() {
             Some(s) => s,
